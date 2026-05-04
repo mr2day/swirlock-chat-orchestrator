@@ -10,7 +10,7 @@ POST /v2/chat/sessions/:sessionId/turns — submit turn (per spec)
 GET /v2/chat/sessions/:sessionId — inspect session + history (extension, useful for dev)
 DELETE /v2/chat/sessions/:sessionId — delete session (your requirement)
 GET /v2/health — liveness/readiness
-Single source of truth config: service.config.cjs holds the port (3010), the hardcoded dev user (dev-user / dev-token-change-me), the LLM Host base URL (http://127.0.0.1:3000 per the v2 local-port convention), and the SQLite path. The validator fails fast if any required value is missing.
+Single source of truth config: service.config.cjs holds the port (3010), the hardcoded dev user (dev-user / dev-token-change-me), the LLM Host base URL (http://127.0.0.1:3213 per the v2 local-port convention), and the SQLite path. The validator fails fast if any required value is missing.
 
 Storage: src/database/database.service.ts creates data/chat-orchestrator.sqlite with two tables (sessions, messages) and a seq index for ordered history. Whole-conversation rebuild on every turn — no fragmenter — exactly as you asked.
 

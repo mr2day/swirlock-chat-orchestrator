@@ -71,7 +71,7 @@ URL, and the SQLite file path. The bootstrap and any future
 Defaults:
 
 - HTTP listener: `127.0.0.1:3010`
-- Primary LLM Host: `http://127.0.0.1:3000` (the v2 local convention)
+- Primary LLM Host: `http://127.0.0.1:3213` (the v2 local convention)
 - SQLite file: `./data/chat-orchestrator.sqlite`
 - Dev user: `dev-user`
 - Dev bearer token: `dev-token-change-me` *(change before exposing)*

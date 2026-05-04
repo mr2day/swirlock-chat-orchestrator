@@ -17,7 +17,7 @@ const path = require('path');
 const env = {
   // HTTP listener
   host: '127.0.0.1',
-  port: 3010,
+  port: 3200,
 
   // API version surfaced in `meta.apiVersion` of every response.
   apiVersion: 'v2',
@@ -38,9 +38,9 @@ const env = {
   },
 
   // Primary LLM Host endpoint. Convention from INTERNAL_INFRASTRUCTURE.md is
-  // port 3000 for a Model Host implementation.
+  // port 3213 for a Model Host implementation.
   llmHost: {
-    baseUrl: 'http://127.0.0.1:3000',
+    baseUrl: 'http://127.0.0.1:3213',
     callerService: 'chat-orchestrator',
     timeoutMs: 120000,
   },

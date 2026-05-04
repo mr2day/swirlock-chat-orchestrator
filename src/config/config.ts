@@ -50,7 +50,10 @@ function validate(c: ServiceConfig): void {
   };
   must(c.host, 'host required');
   must(typeof c.port === 'number' && c.port > 0, 'port required');
-  must(typeof c.apiVersion === 'string' && c.apiVersion.length > 0, 'apiVersion required');
+  must(
+    typeof c.apiVersion === 'string' && c.apiVersion.length > 0,
+    'apiVersion required',
+  );
   must(c.devUser?.userId, 'devUser.userId required');
   must(c.devUser?.bearerToken, 'devUser.bearerToken required');
   must(c.database?.file, 'database.file required');
