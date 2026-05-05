@@ -37,8 +37,16 @@ const env = {
     file: path.resolve(__dirname, 'data', 'chat-orchestrator.sqlite'),
   },
 
-  // Primary LLM Host endpoint. Convention from INTERNAL_INFRASTRUCTURE.md is
-  // port 3213 for a Model Host implementation.
+  // Final-answer LLM Host endpoint. Convention from INTERNAL_INFRASTRUCTURE.md
+  // is port 3213 for a Model Host implementation.
+  //
+  // Operational note: in the v3 architecture this slot is the Primary LLM
+  // Host (Main Computer). Today, the Main Computer deployment does not exist
+  // yet, and the only running Model Host is the Utility LLM Host on the
+  // local machine. We point the orchestrator at the Utility LLM Host as a
+  // temporary substitute for Primary. When the Main Computer comes online,
+  // change this baseUrl to the Primary's network URL — no other code needs
+  // to change, because the Model Host API is agnostic.
   llmHost: {
     baseUrl: 'http://127.0.0.1:3213',
     callerService: 'chat-orchestrator',
