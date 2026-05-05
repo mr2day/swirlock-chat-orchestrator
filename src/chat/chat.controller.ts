@@ -17,7 +17,6 @@ import {
 import type { CorrelatedRequest } from '../common/correlation-id.middleware';
 import { ChatService } from './chat.service';
 import { CreateSessionDto } from './dto/create-session.dto';
-import { SubmitTurnDto } from './dto/submit-turn.dto';
 
 type AuthedRequest = AuthenticatedRequest & CorrelatedRequest;
 
@@ -56,21 +55,6 @@ export class ChatController {
   ) {
     return this.chat.deleteSession({
       sessionId,
-      correlationId: req.correlationId ?? '',
-      authUserId: req.user!.userId,
-    });
-  }
-
-  @Post(':sessionId/turns')
-  @HttpCode(200)
-  submitTurn(
-    @Param('sessionId', ParseUUIDPipe) sessionId: string,
-    @Body() body: SubmitTurnDto,
-    @Req() req: AuthedRequest,
-  ) {
-    return this.chat.submitTurn({
-      sessionId,
-      dto: body,
       correlationId: req.correlationId ?? '',
       authUserId: req.user!.userId,
     });

@@ -14,6 +14,7 @@ import { buildMeta } from '../common/meta.util';
 import type { ApiMeta } from '../common/meta.util';
 import { LlmHostService } from '../llm-host/llm-host.service';
 import type { QueueWaitInfo } from '../llm-host/llm-host.service';
+import type { RetrievalStreamEvent } from '../rag/rag.service';
 import { ChatService } from './chat.service';
 import { SubmitTurnDto } from './dto/submit-turn.dto';
 
@@ -27,6 +28,7 @@ type ChatStreamEvent =
   | { type: 'accepted'; meta: ApiMeta }
   | { type: 'queued'; meta: ApiMeta; data: QueueWaitInfo }
   | { type: 'started'; meta: ApiMeta }
+  | { type: 'retrieval'; meta: ApiMeta; data: RetrievalStreamEvent }
   | { type: 'thinking'; meta: ApiMeta; data: { text: string } }
   | { type: 'chunk'; meta: ApiMeta; data: { text: string } }
   | {
@@ -41,6 +43,16 @@ type ChatStreamEvent =
           createdAt: string;
         };
         finishReason: 'stop' | 'length' | 'error';
+        citations?: Array<{
+          evidenceId: string;
+          sourceTitle: string;
+          sourceUrl?: string;
+        }>;
+        diagnostics?: {
+          retrievalUsed: boolean;
+          memoryFragmentCount: number;
+          retrievalMode: string;
+        };
       };
     }
   | {
@@ -69,6 +81,7 @@ function rawToString(raw: WebSocket.RawData): string {
  *
  *   server → client  (zero or more, terminating with `done` or `error`)
  *     { type: "accepted", meta }
+ *     { type: "retrieval", meta, data: RetrievalStreamEvent }
  *     { type: "queued",   meta, data: QueueWaitInfo }   // upstream passthrough
  *     { type: "started",  meta }
  *     { type: "thinking", meta, data: { text } }        // upstream passthrough
@@ -133,6 +146,12 @@ export class ChatStreamHandler {
       return;
     }
 
+    send({ type: 'accepted', meta: meta() });
+
+    const wantThinking = dto.options?.thinking !== false;
+    const abort = new AbortController();
+    ws.once('close', () => abort.abort());
+
     let prepared;
     try {
       prepared = await this.chat.prepareTurn({
@@ -140,18 +159,16 @@ export class ChatStreamHandler {
         dto,
         correlationId: ctx.correlationId,
         authUserId: ctx.authUserId,
+        abortSignal: abort.signal,
+        onRagStreamEvent: (event) => {
+          send({ type: 'retrieval', meta: meta(), data: event });
+        },
       });
     } catch (err) {
       const status = err instanceof HttpException ? err.getStatus() : 500;
       closeWithError(status, (err as Error).message);
       return;
     }
-
-    send({ type: 'accepted', meta: meta() });
-
-    const wantThinking = dto.options?.thinking !== false;
-    const abort = new AbortController();
-    ws.once('close', () => abort.abort());
 
     let assistantText = '';
     let finishReason: 'stop' | 'length' | 'error' = 'stop';
@@ -232,6 +249,20 @@ export class ChatStreamHandler {
           createdAt: persisted.createdAt,
         },
         finishReason,
+        citations: prepared.ragContext.evidence.map((e) => ({
+          evidenceId: e.evidenceId,
+          sourceTitle: e.sourceTitle,
+          ...(e.sourceUrl ? { sourceUrl: e.sourceUrl } : {}),
+        })),
+        ...(dto.options?.includeDiagnostics === true
+          ? {
+              diagnostics: {
+                retrievalUsed: prepared.ragContext.retrievalUsed,
+                memoryFragmentCount: 0,
+                retrievalMode: prepared.ragContext.retrievalMode,
+              },
+            }
+          : {}),
       },
     });
     try {

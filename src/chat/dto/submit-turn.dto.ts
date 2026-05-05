@@ -53,10 +53,6 @@ class MessageDto {
 
 class OptionsDto {
   @IsOptional()
-  @IsIn(['blocking'])
-  responseMode?: 'blocking';
-
-  @IsOptional()
   @IsInt()
   @Min(1)
   maxOutputTokens?: number;
@@ -66,9 +62,8 @@ class OptionsDto {
   includeDiagnostics?: boolean;
 
   /**
-   * Orchestrator extension beyond the v2 OpenAPI: when streaming, request
-   * upstream `thinking` events from the Model Host. Ignored on the blocking
-   * endpoint. Defaults to `true` on the streaming endpoint.
+   * Request upstream `thinking` events from the Model Host. Defaults to
+   * `true` on the streaming endpoint.
    */
   @IsOptional()
   @IsBoolean()

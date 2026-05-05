@@ -15,6 +15,8 @@
 const path = require('path');
 
 const env = {
+  serviceName: 'swirlock-chat-orchestrator',
+
   // HTTP listener
   host: '127.0.0.1',
   port: 3200,
@@ -53,13 +55,18 @@ const env = {
     timeoutMs: 120000,
   },
 
-  // RAG Engine hook. Disabled in this first version; the orchestrator calls
-  // the LLM Host directly. When you wire up the RAG Engine, set `enabled: true`
-  // and point `baseUrl` at it. The orchestrator's `RagService` is the single
-  // place that consumes this config.
+  // RAG Engine endpoint. The orchestrator uses the WebSocket stream so it can
+  // forward retrieval progress to connected chat clients before final-answer
+  // inference starts.
   rag: {
-    enabled: false,
-    baseUrl: null,
+    enabled: true,
+    baseUrl: 'http://127.0.0.1:3001',
+    callerService: 'chat-orchestrator',
+    timeoutMs: 90000,
+    freshness: 'medium',
+    allowedModes: ['local_rag', 'live_web'],
+    maxEvidenceChunks: 8,
+    synthesisMode: 'brief',
   },
 };
 

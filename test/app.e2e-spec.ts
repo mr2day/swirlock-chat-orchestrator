@@ -4,7 +4,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 
-describe('AppController (e2e)', () => {
+describe('Chat Orchestrator (e2e)', () => {
   let app: INestApplication<App>;
 
   beforeEach(async () => {
@@ -16,11 +16,13 @@ describe('AppController (e2e)', () => {
     await app.init();
   });
 
-  it('/ (GET)', () => {
+  it('/v2/health (GET)', () => {
     return request(app.getHttpServer())
-      .get('/')
+      .get('/v2/health')
       .expect(200)
-      .expect('Hello World!');
+      .expect((response) => {
+        expect(response.body.data.status).toBe('ok');
+      });
   });
 
   afterEach(async () => {

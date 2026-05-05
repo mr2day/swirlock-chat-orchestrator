@@ -10,10 +10,13 @@ import { SERVICE_CONFIG } from '../config/config';
 import type { ServiceConfig } from '../config/config';
 import { buildMeta } from '../common/meta.util';
 import { DatabaseService } from '../database/database.service';
-import { LlmHostService } from '../llm-host/llm-host.service';
 import type { LlmInputPart } from '../llm-host/llm-host.service';
 import { RagService } from '../rag/rag.service';
-import type { RagContext } from '../rag/rag.service';
+import type {
+  RagContext,
+  RagInputPart,
+  RetrievalStreamEvent,
+} from '../rag/rag.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import type { InputPartDto, SubmitTurnDto } from './dto/submit-turn.dto';
 
@@ -59,7 +62,6 @@ export class ChatService {
   constructor(
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly db: DatabaseService,
-    private readonly llm: LlmHostService,
     private readonly rag: RagService,
   ) {}
 
@@ -154,15 +156,16 @@ export class ChatService {
   }
 
   /**
-   * Loads session, validates auth, normalizes input, fetches RAG context, and
-   * builds the LLM Host input parts. Shared between the blocking POST and the
-   * streaming WebSocket so both honor the same orchestration contract.
+   * Loads session, validates auth, normalizes input, fetches RAG context over
+   * WebSocket, and builds the LLM Host input parts for the chat stream.
    */
   async prepareTurn(args: {
     sessionId: string;
     dto: SubmitTurnDto;
     correlationId: string;
     authUserId: string;
+    onRagStreamEvent?: (event: RetrievalStreamEvent) => void;
+    abortSignal?: AbortSignal;
   }): Promise<PreparedTurn> {
     const { sessionId, dto, correlationId, authUserId } = args;
     this.loadSession(sessionId, authUserId);
@@ -186,6 +189,9 @@ export class ChatService {
       correlationId,
       sessionId,
       userText,
+      parts: this.buildRagParts(dto.message.parts),
+      onStreamEvent: args.onRagStreamEvent,
+      abortSignal: args.abortSignal,
     });
 
     const llmParts: LlmInputPart[] = [
@@ -260,58 +266,6 @@ export class ChatService {
     return { turnId, userMessageId, assistantMessageId, createdAt };
   }
 
-  async submitTurn(args: {
-    sessionId: string;
-    dto: SubmitTurnDto;
-    correlationId: string;
-    authUserId: string;
-  }) {
-    const { sessionId, dto, correlationId } = args;
-    const prepared = await this.prepareTurn(args);
-
-    const inferred = await this.llm.infer({
-      correlationId,
-      parts: prepared.llmParts,
-    });
-
-    const persisted = this.persistTurn({
-      sessionId,
-      parts: dto.message.parts,
-      userText: prepared.userText,
-      occurredAt: dto.message.occurredAt,
-      assistantText: inferred.text,
-    });
-
-    const includeDiagnostics = dto.options?.includeDiagnostics === true;
-
-    return {
-      meta: buildMeta(correlationId, this.cfg.apiVersion),
-      data: {
-        sessionId,
-        turnId: persisted.turnId,
-        assistantMessage: {
-          messageId: persisted.assistantMessageId,
-          content: inferred.text,
-          createdAt: persisted.createdAt,
-        },
-        citations: prepared.ragContext.evidence.map((e) => ({
-          evidenceId: e.evidenceId,
-          sourceTitle: e.sourceTitle,
-          ...(e.sourceUrl ? { sourceUrl: e.sourceUrl } : {}),
-        })),
-        ...(includeDiagnostics
-          ? {
-              diagnostics: {
-                retrievalUsed: prepared.ragContext.retrievalUsed,
-                memoryFragmentCount: 0,
-                retrievalMode: prepared.ragContext.retrievalMode,
-              },
-            }
-          : {}),
-      },
-    };
-  }
-
   /**
    * Verifies the session exists and belongs to the authenticated user.
    * Used by every chat endpoint, including the streaming one before we
@@ -355,6 +309,24 @@ export class ChatService {
       out.push({ imageUrl: p.imageUrl, mimeType: p.mimeType });
     }
     return out;
+  }
+
+  private buildRagParts(parts: InputPartDto[]): RagInputPart[] {
+    return parts
+      .map((part) => {
+        if (part.type === 'text') {
+          const text = part.text?.trim() ?? '';
+          return text ? { type: 'text' as const, text } : null;
+        }
+
+        return {
+          type: 'image' as const,
+          ...(part.imageUrl ? { imageUrl: part.imageUrl } : {}),
+          ...(part.imageId ? { imageId: part.imageId } : {}),
+          ...(part.mimeType ? { mimeType: part.mimeType } : {}),
+        };
+      })
+      .filter((part): part is RagInputPart => Boolean(part));
   }
 
   private buildPrompt(
