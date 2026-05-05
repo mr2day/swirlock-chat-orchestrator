@@ -64,6 +64,15 @@ class OptionsDto {
   @IsOptional()
   @IsBoolean()
   includeDiagnostics?: boolean;
+
+  /**
+   * Orchestrator extension beyond the v2 OpenAPI: when streaming, request
+   * upstream `thinking` events from the Model Host. Ignored on the blocking
+   * endpoint. Defaults to `true` on the streaming endpoint.
+   */
+  @IsOptional()
+  @IsBoolean()
+  thinking?: boolean;
 }
 
 export class SubmitTurnDto {

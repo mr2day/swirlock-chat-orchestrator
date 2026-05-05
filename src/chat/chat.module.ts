@@ -4,10 +4,12 @@ import { LlmHostModule } from '../llm-host/llm-host.module';
 import { RagModule } from '../rag/rag.module';
 import { ChatController } from './chat.controller';
 import { ChatService } from './chat.service';
+import { ChatStreamHandler } from './chat-stream.handler';
 
 @Module({
   imports: [AuthModule, LlmHostModule, RagModule],
   controllers: [ChatController],
-  providers: [ChatService],
+  providers: [ChatService, ChatStreamHandler],
+  exports: [ChatStreamHandler],
 })
 export class ChatModule {}

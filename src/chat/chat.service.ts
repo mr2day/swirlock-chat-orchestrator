@@ -10,13 +10,12 @@ import { SERVICE_CONFIG } from '../config/config';
 import type { ServiceConfig } from '../config/config';
 import { buildMeta } from '../common/meta.util';
 import { DatabaseService } from '../database/database.service';
-import {
-  LlmHostService,
-  LlmInputPart,
-} from '../llm-host/llm-host.service';
-import { RagService, RagContext } from '../rag/rag.service';
+import { LlmHostService } from '../llm-host/llm-host.service';
+import type { LlmInputPart } from '../llm-host/llm-host.service';
+import { RagService } from '../rag/rag.service';
+import type { RagContext } from '../rag/rag.service';
 import { CreateSessionDto } from './dto/create-session.dto';
-import { InputPartDto, SubmitTurnDto } from './dto/submit-turn.dto';
+import type { InputPartDto, SubmitTurnDto } from './dto/submit-turn.dto';
 
 interface SessionRow {
   id: string;
@@ -39,6 +38,20 @@ interface MessageRow {
   parts_json: string | null;
   created_at: string;
   seq: number;
+}
+
+export interface PreparedTurn {
+  userText: string;
+  imageParts: Array<{ imageUrl: string; mimeType?: string }>;
+  ragContext: RagContext;
+  llmParts: LlmInputPart[];
+}
+
+export interface PersistedTurn {
+  turnId: string;
+  userMessageId: string;
+  assistantMessageId: string;
+  createdAt: string;
 }
 
 @Injectable()
@@ -140,12 +153,17 @@ export class ChatService {
     };
   }
 
-  async submitTurn(args: {
+  /**
+   * Loads session, validates auth, normalizes input, fetches RAG context, and
+   * builds the LLM Host input parts. Shared between the blocking POST and the
+   * streaming WebSocket so both honor the same orchestration contract.
+   */
+  async prepareTurn(args: {
     sessionId: string;
     dto: SubmitTurnDto;
     correlationId: string;
     authUserId: string;
-  }) {
+  }): Promise<PreparedTurn> {
     const { sessionId, dto, correlationId, authUserId } = args;
     this.loadSession(sessionId, authUserId);
 
@@ -179,23 +197,32 @@ export class ChatService {
       })),
     ];
 
-    const inferred = await this.llm.infer({
-      correlationId,
-      parts: llmParts,
-    });
+    return { userText, imageParts, ragContext, llmParts };
+  }
 
+  /**
+   * Atomically appends user + assistant messages for one turn and bumps
+   * the session's `updated_at`. Returns the generated identifiers and
+   * timestamp the caller should surface to clients.
+   */
+  persistTurn(args: {
+    sessionId: string;
+    parts: InputPartDto[];
+    userText: string;
+    occurredAt: string;
+    assistantText: string;
+  }): PersistedTurn {
     const turnId = randomUUID();
     const userMessageId = randomUUID();
     const assistantMessageId = randomUUID();
-    const assistantCreatedAt = new Date().toISOString();
-    const userOccurredAt = dto.message.occurredAt;
+    const createdAt = new Date().toISOString();
 
     const tx = this.db.connection.transaction(() => {
       const seqRow = this.db.connection
         .prepare(
           `SELECT COALESCE(MAX(seq), 0) AS m FROM messages WHERE session_id = ?`,
         )
-        .get(sessionId) as { m: number };
+        .get(args.sessionId) as { m: number };
       let nextSeq = seqRow.m + 1;
       this.db.connection
         .prepare(
@@ -204,11 +231,11 @@ export class ChatService {
         )
         .run(
           userMessageId,
-          sessionId,
+          args.sessionId,
           turnId,
-          userText,
-          JSON.stringify(dto.message.parts),
-          userOccurredAt,
+          args.userText,
+          JSON.stringify(args.parts),
+          args.occurredAt,
           nextSeq++,
         );
       this.db.connection
@@ -218,17 +245,42 @@ export class ChatService {
         )
         .run(
           assistantMessageId,
-          sessionId,
+          args.sessionId,
           turnId,
-          inferred.text,
-          assistantCreatedAt,
+          args.assistantText,
+          createdAt,
           nextSeq++,
         );
       this.db.connection
         .prepare(`UPDATE sessions SET updated_at = ? WHERE id = ?`)
-        .run(assistantCreatedAt, sessionId);
+        .run(createdAt, args.sessionId);
     });
     tx();
+
+    return { turnId, userMessageId, assistantMessageId, createdAt };
+  }
+
+  async submitTurn(args: {
+    sessionId: string;
+    dto: SubmitTurnDto;
+    correlationId: string;
+    authUserId: string;
+  }) {
+    const { sessionId, dto, correlationId } = args;
+    const prepared = await this.prepareTurn(args);
+
+    const inferred = await this.llm.infer({
+      correlationId,
+      parts: prepared.llmParts,
+    });
+
+    const persisted = this.persistTurn({
+      sessionId,
+      parts: dto.message.parts,
+      userText: prepared.userText,
+      occurredAt: dto.message.occurredAt,
+      assistantText: inferred.text,
+    });
 
     const includeDiagnostics = dto.options?.includeDiagnostics === true;
 
@@ -236,13 +288,13 @@ export class ChatService {
       meta: buildMeta(correlationId, this.cfg.apiVersion),
       data: {
         sessionId,
-        turnId,
+        turnId: persisted.turnId,
         assistantMessage: {
-          messageId: assistantMessageId,
+          messageId: persisted.assistantMessageId,
           content: inferred.text,
-          createdAt: assistantCreatedAt,
+          createdAt: persisted.createdAt,
         },
-        citations: ragContext.evidence.map((e) => ({
+        citations: prepared.ragContext.evidence.map((e) => ({
           evidenceId: e.evidenceId,
           sourceTitle: e.sourceTitle,
           ...(e.sourceUrl ? { sourceUrl: e.sourceUrl } : {}),
@@ -250,14 +302,23 @@ export class ChatService {
         ...(includeDiagnostics
           ? {
               diagnostics: {
-                retrievalUsed: ragContext.retrievalUsed,
+                retrievalUsed: prepared.ragContext.retrievalUsed,
                 memoryFragmentCount: 0,
-                retrievalMode: ragContext.retrievalMode,
+                retrievalMode: prepared.ragContext.retrievalMode,
               },
             }
           : {}),
       },
     };
+  }
+
+  /**
+   * Verifies the session exists and belongs to the authenticated user.
+   * Used by every chat endpoint, including the streaming one before we
+   * even open the upstream LLM Host connection.
+   */
+  assertSessionOwnership(sessionId: string, authUserId: string): void {
+    this.loadSession(sessionId, authUserId);
   }
 
   private loadSession(sessionId: string, authUserId: string): SessionRow {

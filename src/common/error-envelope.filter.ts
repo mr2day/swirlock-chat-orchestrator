@@ -37,7 +37,10 @@ export class ErrorEnvelopeFilter implements ExceptionFilter {
 
     const correlationId = req.correlationId ?? '';
     const status = this.statusOf(exception);
-    const { code, message, retryable, details } = this.classify(exception, status);
+    const { code, message, retryable, details } = this.classify(
+      exception,
+      status,
+    );
 
     if (status >= 500) {
       this.log.error(
@@ -63,7 +66,12 @@ export class ErrorEnvelopeFilter implements ExceptionFilter {
   private classify(
     exception: unknown,
     status: number,
-  ): { code: string; message: string; retryable: boolean; details?: Record<string, unknown> } {
+  ): {
+    code: string;
+    message: string;
+    retryable: boolean;
+    details?: Record<string, unknown>;
+  } {
     if (exception instanceof HttpException) {
       const r = exception.getResponse();
       const message = this.messageFromHttp(r, exception.message);
@@ -80,7 +88,8 @@ export class ErrorEnvelopeFilter implements ExceptionFilter {
     }
     return {
       code: 'internal_error',
-      message: exception instanceof Error ? exception.message : 'Internal error',
+      message:
+        exception instanceof Error ? exception.message : 'Internal error',
       retryable: true,
     };
   }

@@ -28,16 +28,21 @@ When the dependent services come online, the wiring points are:
 All chat endpoints are gated by the bearer auth guard. The health endpoint is
 not.
 
-| Method | Path                                  | Notes                                    |
-| ------ | ------------------------------------- | ---------------------------------------- |
-| POST   | `/v2/chat/sessions`                   | Create a session (contract operation).   |
-| GET    | `/v2/chat/sessions/:sessionId`        | Inspect session + full message history.  |
-| DELETE | `/v2/chat/sessions/:sessionId`        | Delete a session and all its messages.   |
-| POST   | `/v2/chat/sessions/:sessionId/turns`  | Submit a user turn, get an assistant turn. |
-| GET    | `/v2/health`                          | Liveness/readiness.                      |
+| Method | Path                                          | Notes                                                                |
+| ------ | --------------------------------------------- | -------------------------------------------------------------------- |
+| POST   | `/v2/chat/sessions`                           | Create a session (contract operation).                               |
+| GET    | `/v2/chat/sessions/:sessionId`                | Inspect session + full message history.                              |
+| DELETE | `/v2/chat/sessions/:sessionId`                | Delete a session and all its messages.                               |
+| POST   | `/v2/chat/sessions/:sessionId/turns`          | Submit a user turn, get an assistant turn (blocking).                |
+| WS     | `/v2/chat/sessions/:sessionId/turns/stream`   | Submit a user turn, receive streamed thinking/chunk events.          |
+| GET    | `/v2/health`                                  | Liveness/readiness.                                                  |
 
-`GET` and `DELETE` for sessions are extensions beyond the v2 OpenAPI spec, kept
-intentionally simple because they are useful for local development.
+`GET` / `DELETE` for sessions and the streaming WebSocket are extensions
+beyond the v2 OpenAPI spec, kept intentionally simple because they are
+useful for local development. The stream endpoint mirrors the v2 Model Host
+event shape (`accepted` / `queued` / `started` / `thinking` / `chunk` /
+`done` / `error`) so a frontend can render thinking text and tokens in
+real time.
 
 Every response uses the v2 envelope:
 
@@ -70,7 +75,7 @@ URL, and the SQLite file path. The bootstrap and any future
 
 Defaults:
 
-- HTTP listener: `127.0.0.1:3010`
+- HTTP listener: `127.0.0.1:3200`
 - Primary LLM Host: `http://127.0.0.1:3213` (the v2 local convention)
 - SQLite file: `./data/chat-orchestrator.sqlite`
 - Dev user: `dev-user`
@@ -100,7 +105,7 @@ $create = @{
 } | ConvertTo-Json -Depth 5
 
 $session = Invoke-RestMethod -Method Post `
-  -Uri "http://127.0.0.1:3010/v2/chat/sessions" `
+  -Uri "http://127.0.0.1:3200/v2/chat/sessions" `
   -Headers $Headers -Body $create
 $sessionId = $session.data.sessionId
 
@@ -114,21 +119,74 @@ $turn = @{
 } | ConvertTo-Json -Depth 5
 
 Invoke-RestMethod -Method Post `
-  -Uri "http://127.0.0.1:3010/v2/chat/sessions/$sessionId/turns" `
+  -Uri "http://127.0.0.1:3200/v2/chat/sessions/$sessionId/turns" `
   -Headers $Headers -Body $turn
 
 # 3. Delete the session
 Invoke-RestMethod -Method Delete `
-  -Uri "http://127.0.0.1:3010/v2/chat/sessions/$sessionId" `
+  -Uri "http://127.0.0.1:3200/v2/chat/sessions/$sessionId" `
   -Headers $Headers
 ```
+
+## Streaming smoke test (WebSocket)
+
+The WebSocket endpoint accepts the same `SubmitTurnRequest` body inside one
+`{ type: "submit_turn", correlationId, request }` envelope, then emits
+`accepted` / `queued` / `started` / `thinking` / `chunk` / `done` events
+and closes. Authenticate with one of:
+
+- `Authorization: Bearer <token>` header (non-browser clients)
+- `?token=<token>` query parameter (browser-friendly, since
+  `new WebSocket(url)` cannot set custom headers)
+- `Sec-WebSocket-Protocol: bearer, <token>` (browser-friendly subprotocol
+  via `new WebSocket(url, ['bearer', '<token>'])`)
+
+Browser example (paste into DevTools after `createSession` returns a `sessionId`):
+
+```js
+const sessionId = '...';                       // from POST /v2/chat/sessions
+const token     = 'dev-token-change-me';
+const url = `ws://127.0.0.1:3200/v2/chat/sessions/${sessionId}/turns/stream?token=${token}`;
+const ws  = new WebSocket(url);
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({
+    type: 'submit_turn',
+    correlationId: crypto.randomUUID(),
+    request: {
+      requestContext: { callerService: 'chat-client', requestedAt: new Date().toISOString() },
+      message: {
+        parts: [{ type: 'text', text: 'Tell me a short joke.' }],
+        occurredAt: new Date().toISOString(),
+      },
+      options: { thinking: true },
+    },
+  }));
+};
+
+ws.onmessage = (e) => {
+  const evt = JSON.parse(e.data);
+  switch (evt.type) {
+    case 'thinking': console.log('[thinking]', evt.data.text); break;
+    case 'chunk':    process.stdout?.write?.(evt.data.text) ?? console.log('[chunk]', evt.data.text); break;
+    case 'done':     console.log('\n[done]', evt.data); break;
+    case 'error':    console.error('[error]', evt.error); break;
+    default:         console.log('[' + evt.type + ']', evt);
+  }
+};
+```
+
+The orchestrator buffers `chunk` text on its end and persists the user +
+assistant messages atomically once the upstream LLM Host emits its `done`
+event, so the `done` event you receive carries the persisted
+`turnId`, `assistantMessage.messageId`, and `createdAt`.
 
 ## Project layout
 
 ```
 src/
   auth/         BearerAuthGuard, hardcoded dev user
-  chat/         /v2/chat/sessions controller + service + DTOs
+  chat/         /v2/chat/sessions controller, service, DTOs, and WS stream handler
   common/       correlation-id middleware, ErrorEnvelopeFilter, meta builder
   config/       loader for service.config.cjs
   database/     better-sqlite3 connection and migrations
