@@ -9,7 +9,12 @@ import type { ServiceConfig } from '../config/config';
 
 export type LlmInputPart =
   | { type: 'text'; text: string }
-  | { type: 'image'; imageUrl?: string; imageBase64?: string; mimeType?: string };
+  | {
+      type: 'image';
+      imageUrl?: string;
+      imageBase64?: string;
+      mimeType?: string;
+    };
 
 export interface LlmInferOptions {
   responseFormat?: 'text' | 'json';
@@ -70,7 +75,9 @@ export class LlmHostService {
         signal: ctrl.signal,
       });
     } catch (err) {
-      this.log.error(`LLM Host unreachable at ${url}: ${(err as Error).message}`);
+      this.log.error(
+        `LLM Host unreachable at ${url}: ${(err as Error).message}`,
+      );
       throw new ServiceUnavailableException('LLM Host unreachable');
     } finally {
       clearTimeout(timer);
@@ -88,8 +95,15 @@ export class LlmHostService {
       throw new ServiceUnavailableException('LLM Host returned non-JSON');
     }
     const data = parsed.data;
-    if (!data?.output?.text || !data.finishReason || !data.modelId || !data.generatedAt) {
-      throw new ServiceUnavailableException('LLM Host returned malformed response');
+    if (
+      !data?.output?.text ||
+      !data.finishReason ||
+      !data.modelId ||
+      !data.generatedAt
+    ) {
+      throw new ServiceUnavailableException(
+        'LLM Host returned malformed response',
+      );
     }
     return {
       text: data.output.text,

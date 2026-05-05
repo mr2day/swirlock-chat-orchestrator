@@ -2,7 +2,11 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { SERVICE_CONFIG } from '../config/config';
 import type { ServiceConfig } from '../config/config';
 
-export type RetrievalMode = 'none' | 'local_rag' | 'live_web' | 'local_and_live';
+export type RetrievalMode =
+  | 'none'
+  | 'local_rag'
+  | 'live_web'
+  | 'local_and_live';
 
 export interface RagEvidence {
   evidenceId: string;
@@ -39,11 +43,16 @@ export class RagService {
 
   constructor(@Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig) {}
 
-  async retrieve(_inquiry: RagInquiry): Promise<RagContext> {
-    if (!this.cfg.rag.enabled) {
-      return { retrievalUsed: false, retrievalMode: 'none', evidence: [] };
+  retrieve(_inquiry: RagInquiry): Promise<RagContext> {
+    if (this.cfg.rag.enabled) {
+      this.log.warn(
+        'rag.enabled=true but no RAG Engine client is implemented yet',
+      );
     }
-    this.log.warn('rag.enabled=true but no RAG Engine client is implemented yet');
-    return { retrievalUsed: false, retrievalMode: 'none', evidence: [] };
+    return Promise.resolve({
+      retrievalUsed: false,
+      retrievalMode: 'none',
+      evidence: [],
+    });
   }
 }
