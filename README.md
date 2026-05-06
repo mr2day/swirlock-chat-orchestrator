@@ -35,12 +35,13 @@ not.
 | POST   | `/v2/chat/sessions`                           | Create a session.                                          |
 | GET    | `/v2/chat/sessions/:sessionId`                | Inspect session and full message history.                  |
 | DELETE | `/v2/chat/sessions/:sessionId`                | Delete a session and all its messages.                     |
-| WS     | `/v2/chat/sessions/:sessionId/turns/stream`   | Submit a turn and receive retrieval/thinking/token events. |
+| WS     | `/v2/chat/sessions/:sessionId/turns/stream`   | Persistent session socket for streamed turns.              |
 | GET    | `/v2/health`                                  | Liveness/readiness.                                       |
 
-The chat WebSocket emits `accepted`, `retrieval`, `queued`, `started`,
-`thinking`, `chunk`, `done`, and `error`. `retrieval` wraps the exact
-`RetrievalStreamEvent` received from the RAG Engine WebSocket stream.
+The chat WebSocket accepts multiple `submit_turn` messages over one
+session-scoped connection. Each turn emits `accepted`, `retrieval`, `queued`,
+`started`, `thinking`, `chunk`, `done`, and `error`. `retrieval` wraps the
+exact `RetrievalStreamEvent` received from the RAG Engine WebSocket stream.
 
 ## Configuration
 
@@ -84,7 +85,9 @@ pm2 save
 
 ## Streaming Smoke Test
 
-Create a session with `POST /v2/chat/sessions`, then connect:
+Create a session with `POST /v2/chat/sessions`, then connect once for that
+session. Send another `submit_turn` after a `done` event to reuse the same
+WebSocket:
 
 ```js
 const sessionId = '...';

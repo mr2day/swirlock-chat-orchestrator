@@ -115,6 +115,23 @@ function submitTurnMessage(options: Record<string, unknown>) {
   });
 }
 
+async function waitForSentEvent(
+  ws: FakeWebSocket,
+  eventType: string,
+  count = 1,
+): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    const matches = ws.sent
+      .map((raw) => JSON.parse(raw) as { type: string })
+      .filter((event) => event.type === eventType).length;
+    if (matches >= count) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for ${eventType}`);
+}
+
 describe('ChatStreamHandler thinking routing', () => {
   it('streams and persists direct standardized answers without final LLM inference', async () => {
     const chat = {
@@ -144,6 +161,8 @@ describe('ChatStreamHandler thinking routing', () => {
       ws.emit('message', submitTurnMessage({ includeDiagnostics: true }));
     });
 
+    await waitForSentEvent(ws, 'done');
+    ws.close();
     await run;
 
     expect(streamInfer).not.toHaveBeenCalled();
@@ -217,6 +236,8 @@ describe('ChatStreamHandler thinking routing', () => {
       ws.emit('message', submitTurnMessage({ thinking: true }));
     });
 
+    await waitForSentEvent(ws, 'done');
+    ws.close();
     await run;
 
     expect(streamInfer).toHaveBeenCalledTimes(1);
@@ -255,8 +276,61 @@ describe('ChatStreamHandler thinking routing', () => {
       ws.emit('message', submitTurnMessage({ forceThinking: true }));
     });
 
+    await waitForSentEvent(ws, 'done');
+    ws.close();
     await run;
 
     expect(streamInfer.mock.calls[0]?.[0].options?.thinking).toBe(true);
+  });
+
+  it('keeps the session WebSocket open for multiple turns', async () => {
+    const chat = {
+      assertSessionOwnership: jest.fn(),
+      prepareTurn: jest
+        .fn()
+        .mockResolvedValueOnce(DIRECT_PREPARED_TURN)
+        .mockResolvedValueOnce(DIRECT_PREPARED_TURN),
+      persistTurn: jest
+        .fn()
+        .mockReturnValueOnce({
+          turnId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
+          userMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
+          assistantMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567802',
+          createdAt: '2026-05-06T08:51:40.000Z',
+        })
+        .mockReturnValueOnce({
+          turnId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567810',
+          userMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567811',
+          assistantMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567812',
+          createdAt: '2026-05-06T08:52:40.000Z',
+        }),
+    } as unknown as ChatService;
+    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> =
+      jest.fn();
+    const handler = new ChatStreamHandler(CONFIG, chat, {
+      streamInfer,
+    } as unknown as LlmHostService);
+    const ws = new FakeWebSocket();
+
+    const run = handler.handle(ws as unknown as WebSocket, {
+      sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
+      authUserId: 'dev-user',
+      correlationId: 'turn-1',
+    });
+
+    ws.emit('message', submitTurnMessage({ includeDiagnostics: true }));
+    await waitForSentEvent(ws, 'done');
+    const sentAfterFirstTurn = ws.sent.length;
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    ws.emit('message', submitTurnMessage({ includeDiagnostics: true }));
+    await waitForSentEvent(ws, 'done', 2);
+    ws.close();
+    await run;
+
+    expect(chat.prepareTurn).toHaveBeenCalledTimes(2);
+    expect(chat.persistTurn).toHaveBeenCalledTimes(2);
+    expect(ws.sent.length).toBeGreaterThan(sentAfterFirstTurn);
   });
 });

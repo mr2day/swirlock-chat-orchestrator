@@ -25,6 +25,11 @@ interface ConnectionContext {
   correlationId: string;
 }
 
+interface SubmittedTurn {
+  correlationId: string;
+  dto: SubmitTurnDto;
+}
+
 type ChatStreamEvent =
   | { type: 'accepted'; meta: ApiMeta }
   | { type: 'queued'; meta: ApiMeta; data: QueueWaitInfo }
@@ -69,8 +74,6 @@ type ChatStreamEvent =
       error: { code: string; message: string; retryable: boolean };
     };
 
-const READ_FIRST_MESSAGE_TIMEOUT_MS = 30_000;
-
 function rawToString(raw: WebSocket.RawData): string {
   if (typeof raw === 'string') return raw;
   if (Buffer.isBuffer(raw)) return raw.toString('utf8');
@@ -81,25 +84,11 @@ function rawToString(raw: WebSocket.RawData): string {
 /**
  * Per-connection orchestration for /v2/chat/sessions/:sessionId/turns/stream.
  *
- * Wire protocol (mirrors the v2 Model Host stream shape, plus orchestrator
- * extensions):
- *
- *   client → server  (one message after connect)
- *     { type: "submit_turn", correlationId: "...", request: SubmitTurnRequest }
- *
- *   server → client  (zero or more, terminating with `done` or `error`)
- *     { type: "accepted", meta }
- *     { type: "retrieval", meta, data: RetrievalStreamEvent }
- *     { type: "queued",   meta, data: QueueWaitInfo }   // upstream passthrough
- *     { type: "started",  meta }
- *     { type: "thinking", meta, data: { text } }        // upstream passthrough
- *     { type: "chunk",    meta, data: { text } }        // upstream passthrough
- *     { type: "done",     meta, data: { sessionId, turnId, assistantMessage, finishReason } }
- *     { type: "error",    meta, error: ErrorBody }
- *
- * The orchestrator buffers `chunk` text, persists user + assistant messages
- * once upstream emits `done`, then emits its own `done` with the persisted
- * message identifiers before closing the socket.
+ * The socket is session-scoped and persistent. Clients may send multiple
+ * submit_turn messages over the same WebSocket. The orchestrator processes one
+ * turn at a time, streams accepted/retrieval/queued/started/thinking/chunk
+ * events for that turn, persists user + assistant messages after generation,
+ * then emits done and keeps the socket open for the next turn.
  */
 @Injectable()
 export class ChatStreamHandler {
@@ -112,14 +101,74 @@ export class ChatStreamHandler {
   ) {}
 
   async handle(ws: WebSocket, ctx: ConnectionContext): Promise<void> {
-    const send = (event: ChatStreamEvent): void => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(event));
+    try {
+      this.chat.assertSessionOwnership(ctx.sessionId, ctx.authUserId);
+    } catch (err) {
+      this.sendError(
+        ws,
+        err instanceof HttpException ? err.getStatus() : 500,
+        err instanceof Error ? err.message : 'Session ownership check failed',
+        ctx.correlationId,
+        true,
+      );
+      return;
+    }
+
+    let inFlight = false;
+
+    ws.on('message', (raw: WebSocket.RawData) => {
+      let submitted: SubmittedTurn;
+      try {
+        submitted = this.parseSubmitTurn(raw);
+      } catch (err) {
+        this.sendError(
+          ws,
+          400,
+          err instanceof Error ? err.message : 'Invalid submit_turn message',
+          ctx.correlationId,
+          false,
+        );
+        return;
       }
-    };
-    const meta = (): ApiMeta =>
-      buildMeta(ctx.correlationId, this.cfg.apiVersion);
-    const closeWithError = (status: number, message: string): void => {
+
+      if (inFlight) {
+        this.sendError(
+          ws,
+          409,
+          'A turn is already in progress on this session WebSocket',
+          submitted.correlationId,
+          false,
+        );
+        return;
+      }
+
+      inFlight = true;
+      void this.processTurn(ws, ctx, submitted)
+        .catch((err: Error) => {
+          this.log.error(`processTurn crashed: ${err.message}`, err.stack);
+          this.sendError(ws, 500, err.message, submitted.correlationId, false);
+        })
+        .finally(() => {
+          inFlight = false;
+        });
+    });
+
+    await new Promise<void>((resolve) => {
+      ws.once('close', () => resolve());
+    });
+  }
+
+  private async processTurn(
+    ws: WebSocket,
+    ctx: ConnectionContext,
+    submitted: SubmittedTurn,
+  ): Promise<void> {
+    const { correlationId, dto } = submitted;
+    const meta = (): ApiMeta => buildMeta(correlationId, this.cfg.apiVersion);
+    const send = (event: ChatStreamEvent): void => this.send(ws, event);
+    let cleanupAbort = (): void => undefined;
+    const failTurn = (status: number, message: string): void => {
+      cleanupAbort();
       send({
         type: 'error',
         meta: meta(),
@@ -129,43 +178,30 @@ export class ChatStreamHandler {
           retryable: status >= 500 || status === 429,
         },
       });
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
     };
 
     try {
-      this.chat.assertSessionOwnership(ctx.sessionId, ctx.authUserId);
+      await this.validateSubmitTurn(dto);
     } catch (err) {
-      if (err instanceof HttpException) {
-        closeWithError(err.getStatus(), err.message);
-      } else {
-        closeWithError(500, (err as Error).message);
-      }
-      return;
-    }
-
-    let dto: SubmitTurnDto;
-    try {
-      dto = await this.readSubmitTurn(ws);
-    } catch (err) {
-      closeWithError(400, (err as Error).message);
+      failTurn(400, err instanceof Error ? err.message : 'Invalid turn');
       return;
     }
 
     send({ type: 'accepted', meta: meta() });
 
     const abort = new AbortController();
-    ws.once('close', () => abort.abort());
+    const onClose = (): void => abort.abort();
+    cleanupAbort = (): void => {
+      ws.off('close', onClose);
+    };
+    ws.once('close', onClose);
 
     let prepared: PreparedTurn;
     try {
       prepared = await this.chat.prepareTurn({
         sessionId: ctx.sessionId,
         dto,
-        correlationId: ctx.correlationId,
+        correlationId,
         authUserId: ctx.authUserId,
         abortSignal: abort.signal,
         onRagStreamEvent: (event) => {
@@ -174,7 +210,7 @@ export class ChatStreamHandler {
       });
     } catch (err) {
       const status = err instanceof HttpException ? err.getStatus() : 500;
-      closeWithError(status, (err as Error).message);
+      failTurn(status, (err as Error).message);
       return;
     }
 
@@ -192,7 +228,7 @@ export class ChatStreamHandler {
     } else {
       try {
         const result = await this.llm.streamInfer({
-          correlationId: ctx.correlationId,
+          correlationId,
           parts: prepared.llmParts,
           options: { thinking: wantThinking },
           abortSignal: abort.signal,
@@ -210,9 +246,6 @@ export class ChatStreamHandler {
               case 'chunk':
                 send({ type: 'chunk', meta: meta(), data: evt.data });
                 break;
-              // 'accepted' from upstream is dropped; the orchestrator's own
-              // `accepted` already signaled to the client that we started work.
-              // 'done' and 'error' are handled via the streamInfer result/throw.
               default:
                 break;
             }
@@ -227,16 +260,13 @@ export class ChatStreamHandler {
             : err instanceof HttpException
               ? err.getStatus()
               : 500;
-        closeWithError(status, (err as Error).message);
+        failTurn(status, (err as Error).message);
         return;
       }
     }
 
     if (assistantText.length === 0) {
-      closeWithError(
-        503,
-        'LLM Host completed without emitting any text chunks',
-      );
+      failTurn(503, 'LLM Host completed without emitting any text chunks');
       return;
     }
 
@@ -251,10 +281,11 @@ export class ChatStreamHandler {
       });
     } catch (err) {
       this.log.error(`persistTurn failed: ${(err as Error).message}`);
-      closeWithError(500, 'Failed to persist turn');
+      failTurn(500, 'Failed to persist turn');
       return;
     }
 
+    cleanupAbort();
     send({
       type: 'done',
       meta: meta(),
@@ -292,20 +323,14 @@ export class ChatStreamHandler {
           : {}),
       },
     });
-    try {
-      ws.close();
-    } catch {
-      /* ignore */
-    }
   }
 
-  private async readSubmitTurn(ws: WebSocket): Promise<SubmitTurnDto> {
-    const raw = await this.readFirstMessage(ws);
+  private parseSubmitTurn(raw: WebSocket.RawData): SubmittedTurn {
     let parsed: unknown;
     try {
-      parsed = JSON.parse(raw);
+      parsed = JSON.parse(rawToString(raw));
     } catch {
-      throw new Error('first message must be JSON');
+      throw new Error('message must be JSON');
     }
     if (
       typeof parsed !== 'object' ||
@@ -315,13 +340,28 @@ export class ChatStreamHandler {
       (parsed as { request?: unknown }).request === null
     ) {
       throw new Error(
-        'first message must be { type: "submit_turn", correlationId, request }',
+        'message must be { type: "submit_turn", correlationId, request }',
       );
     }
-    const dto = plainToInstance(
-      SubmitTurnDto,
-      (parsed as { request: unknown }).request,
-    );
+
+    const correlationId =
+      typeof (parsed as { correlationId?: unknown }).correlationId === 'string'
+        ? (parsed as { correlationId: string }).correlationId.trim()
+        : '';
+    if (!correlationId) {
+      throw new Error('submit_turn.correlationId is required');
+    }
+
+    return {
+      correlationId,
+      dto: plainToInstance(
+        SubmitTurnDto,
+        (parsed as { request: unknown }).request,
+      ),
+    };
+  }
+
+  private async validateSubmitTurn(dto: SubmitTurnDto): Promise<void> {
     const errors = await validate(dto, {
       whitelist: true,
       forbidNonWhitelisted: true,
@@ -332,35 +372,37 @@ export class ChatStreamHandler {
         .join('; ');
       throw new Error(`invalid SubmitTurnRequest: ${detail}`);
     }
-    return dto;
   }
 
-  private readFirstMessage(ws: WebSocket): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        cleanup();
-        reject(new Error('no submit_turn message received within timeout'));
-      }, READ_FIRST_MESSAGE_TIMEOUT_MS);
+  private send(ws: WebSocket, event: ChatStreamEvent): void {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(event));
+    }
+  }
 
-      const onMessage = (raw: WebSocket.RawData): void => {
-        cleanup();
-        resolve(rawToString(raw));
-      };
-      const onClose = (): void => {
-        cleanup();
-        reject(
-          new Error('client closed connection before sending submit_turn'),
-        );
-      };
-      const cleanup = (): void => {
-        clearTimeout(timer);
-        ws.off('message', onMessage);
-        ws.off('close', onClose);
-      };
-
-      ws.once('message', onMessage);
-      ws.once('close', onClose);
+  private sendError(
+    ws: WebSocket,
+    status: number,
+    message: string,
+    correlationId: string,
+    close: boolean,
+  ): void {
+    this.send(ws, {
+      type: 'error',
+      meta: buildMeta(correlationId, this.cfg.apiVersion),
+      error: {
+        code: this.codeFor(status),
+        message,
+        retryable: status >= 500 || status === 429,
+      },
     });
+    if (close) {
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   private codeFor(status: number): string {
@@ -373,6 +415,8 @@ export class ChatStreamHandler {
         return 'forbidden';
       case 404:
         return 'not_found';
+      case 409:
+        return 'conflict';
       case 422:
         return 'validation_failed';
       case 502:
