@@ -1,47 +1,57 @@
 # Swirlock Chat Orchestrator
 
 NestJS backend service that owns the user-turn lifecycle for the Swirlock
-chatbot ecosystem. This implementation follows the
-[Swirlock Chatbot Contracts v3](../swirlock-chatbot-contracts/docs/versions/v3/)
-`chat-orchestrator` surface.
+chatbot ecosystem. This implementation follows the breaking
+[Swirlock Chatbot Contracts v4](../swirlock-chatbot-contracts/docs/versions/v4/).
 
 ## Scope
 
 Built now:
 
-- single hardcoded dev user, protected by a hardcoded bearer token
+- one persistent client WebSocket: `WS /v4/chat`
+- session create/get/delete messages on that socket
+- streamed turn submission on that socket
+- Utility LLM turn classification over persistent Model Host WebSocket
+- RAG Engine integration over persistent WebSocket
+- final-answer generation over persistent Model Host WebSocket
 - conversation sessions stored directly in SQLite
-- RAG Engine integration over WebSocket, forwarding retrieval progress
-  through the chat stream
-- Utility LLM turn classification before retrieval or final-answer inference
-- client image input via `imageUrl` or pasted-image `imageBase64`
-- final-answer generation through Model Host WebSocket `/v2/infer/stream`
-- ecosystem turn submission is WebSocket-only
 
-Still pending:
+There are no ecosystem REST endpoints.
 
-- real authentication and multi-user identity
-- Context Fragmenter memory selection and recording
-- `imageId` media resolution
-- degraded final-answer fallback diagnostics
+## WebSocket API
 
-## Endpoints
+Endpoint:
 
-All chat endpoints are gated by the bearer auth guard. The health endpoint is
-not.
+```text
+ws://127.0.0.1:3200/v4/chat?token=dev-token-change-me
+```
 
-| Method | Path                                          | Notes                                                       |
-| ------ | --------------------------------------------- | ----------------------------------------------------------- |
-| POST   | `/v2/chat/sessions`                           | Create a session.                                          |
-| GET    | `/v2/chat/sessions/:sessionId`                | Inspect session and full message history.                  |
-| DELETE | `/v2/chat/sessions/:sessionId`                | Delete a session and all its messages.                     |
-| WS     | `/v2/chat/sessions/:sessionId/turns/stream`   | Persistent session socket for streamed turns.              |
-| GET    | `/v2/health`                                  | Liveness/readiness.                                       |
+Client messages use the shared v4 envelope:
 
-The chat WebSocket accepts multiple `submit_turn` messages over one
-session-scoped connection. Each turn emits `accepted`, `retrieval`, `queued`,
-`started`, `thinking`, `chunk`, `done`, and `error`. `retrieval` wraps the
-exact `RetrievalStreamEvent` received from the RAG Engine WebSocket stream.
+- `session.create`
+- `session.get`
+- `session.delete`
+- `turn.submit`
+- `health.get`
+- `cancel`
+- `heartbeat`
+
+Server messages include:
+
+- `session.created`
+- `session.snapshot`
+- `session.deleted`
+- `turn.accepted`
+- `turn.classifying`
+- `turn.retrieval`
+- `turn.queued`
+- `turn.started`
+- `turn.thinking`
+- `turn.chunk`
+- `turn.done`
+- `health`
+- `error`
+- `heartbeat`
 
 ## Configuration
 
@@ -51,11 +61,10 @@ Runtime configuration lives in one committed file:
 
 Defaults:
 
-- HTTP listener: `127.0.0.1:3200`
+- listener: `127.0.0.1:3200`
 - RAG Engine: `http://127.0.0.1:3001`
 - Model Host: `http://127.0.0.1:3213`
-- Utility Model Host: `http://127.0.0.1:3213` with caller service
-  `chat-orchestrator:turn-classifier`
+- Utility Model Host: `http://127.0.0.1:3213`
 - SQLite file: `./data/chat-orchestrator.sqlite`
 - Dev user: `dev-user`
 - Dev bearer token: `dev-token-change-me`
@@ -83,81 +92,41 @@ pm2 restart ecosystem.config.cjs --update-env
 pm2 save
 ```
 
-## Streaming Smoke Test
+## Smoke Test
 
-Create a session with `POST /v2/chat/sessions`, then connect once for that
-session. Send another `submit_turn` after a `done` event to reuse the same
-WebSocket:
+Open one WebSocket to `/v4/chat`, send `session.create`, then reuse the same
+socket for `turn.submit`:
 
 ```js
-const sessionId = '...';
-const token = 'dev-token-change-me';
-const url = `ws://127.0.0.1:3200/v2/chat/sessions/${sessionId}/turns/stream?token=${token}`;
-const ws = new WebSocket(url);
+const ws = new WebSocket('ws://127.0.0.1:3200/v4/chat?token=dev-token-change-me');
 
 ws.onopen = () => {
+  const correlationId = crypto.randomUUID();
   ws.send(JSON.stringify({
-    type: 'submit_turn',
-    correlationId: crypto.randomUUID(),
-    request: {
-      requestContext: {
-        callerService: 'chat-client',
-        requestedAt: new Date().toISOString()
-      },
-      message: {
-        parts: [{ type: 'text', text: 'Tell me a short joke.' }],
-        occurredAt: new Date().toISOString()
-      },
-      options: { forceThinking: true }
+    type: 'session.create',
+    correlationId,
+    payload: {
+      request: {
+        requestContext: {
+          callerService: 'smoke-test',
+          requestedAt: new Date().toISOString(),
+          priority: 'interactive'
+        },
+        participant: { userId: 'dev-user', displayName: 'Dev User' },
+        app: { appId: 'smoke-test', personaId: 'swirlock' }
+      }
     }
   }));
 };
-
-ws.onmessage = (e) => {
-  const evt = JSON.parse(e.data);
-  switch (evt.type) {
-    case 'retrieval':
-      console.log('[retrieval]', evt.data.type, evt.data.data);
-      break;
-    case 'thinking':
-      console.log('[thinking]', evt.data.text);
-      break;
-    case 'chunk':
-      console.log('[chunk]', evt.data.text);
-      break;
-    case 'done':
-      console.log('[done]', evt.data);
-      break;
-    case 'error':
-      console.error('[error]', evt.error);
-      break;
-    default:
-      console.log('[' + evt.type + ']', evt);
-  }
-};
 ```
 
-The `done` event carries the persisted `turnId`,
-`assistantMessage.messageId`, `createdAt`, and citations.
-When `options.includeDiagnostics` is true, it also includes the selected
-turn route, retrieval/thinking booleans, intent, freshness, and planner
-reason. Utility classifier prompts and raw outputs are never persisted as
-conversation messages.
-
-## Project Layout
+## Source Layout
 
 ```text
 src/
-  auth/         BearerAuthGuard, hardcoded dev user
-  chat/         /v2/chat/sessions controller, service, DTOs, and WS handler
-  common/       correlation-id middleware, ErrorEnvelopeFilter, meta builder
-  config/       loader for service.config.cjs
-  database/     better-sqlite3 connection and migrations
-  health/       /v2/health
-  llm-host/     WebSocket client for the configured Model Host
-  rag/          WebSocket client for the RAG Engine stream
-  app.module.ts
-  main.ts
-service.config.cjs    single source of truth for runtime config
-ecosystem.config.cjs  PM2 process definition
+  auth/         WebSocket bearer-token extraction and guard helpers
+  chat/         v4 chat socket handler, service, DTOs, prompt planning
+  database/     SQLite setup
+  llm-host/     persistent v4 Model Host client
+  rag/          persistent v4 RAG Engine client
 ```

@@ -29,7 +29,7 @@ const CONFIG: ServiceConfig = {
   serviceName: 'swirlock-chat-orchestrator',
   host: '127.0.0.1',
   port: 3200,
-  apiVersion: 'v2',
+  apiVersion: 'v4',
   devUser: {
     userId: 'dev-user',
     displayName: 'Dev User',

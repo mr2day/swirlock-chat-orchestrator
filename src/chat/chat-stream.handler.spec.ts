@@ -9,7 +9,7 @@ const CONFIG: ServiceConfig = {
   serviceName: 'swirlock-chat-orchestrator',
   host: '127.0.0.1',
   port: 3200,
-  apiVersion: 'v2',
+  apiVersion: 'v4',
   devUser: {
     userId: 'dev-user',
     displayName: 'Dev User',
@@ -81,19 +81,22 @@ class FakeWebSocket extends EventEmitter {
 
 function submitTurnMessage(options: Record<string, unknown>) {
   return JSON.stringify({
-    type: 'submit_turn',
+    type: 'turn.submit',
     correlationId: 'turn-1',
-    request: {
-      requestContext: {
-        callerService: 'chat-client',
-        priority: 'interactive',
-        requestedAt: '2026-05-06T08:51:37.443Z',
+    payload: {
+      sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
+      request: {
+        requestContext: {
+          callerService: 'chat-client',
+          priority: 'interactive',
+          requestedAt: '2026-05-06T08:51:37.443Z',
+        },
+        message: {
+          parts: [{ type: 'text', text: 'hello' }],
+          occurredAt: '2026-05-06T08:51:37.443Z',
+        },
+        options,
       },
-      message: {
-        parts: [{ type: 'text', text: 'hello' }],
-        occurredAt: '2026-05-06T08:51:37.443Z',
-      },
-      options,
     },
   });
 }
@@ -145,7 +148,6 @@ describe('ChatStreamHandler thinking routing', () => {
     const ws = new FakeWebSocket();
 
     const run = handler.handle(ws as unknown as WebSocket, {
-      sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
       authUserId: 'dev-user',
       correlationId: 'turn-1',
     });
@@ -154,7 +156,7 @@ describe('ChatStreamHandler thinking routing', () => {
       ws.emit('message', submitTurnMessage({ thinking: true }));
     });
 
-    await waitForSentEvent(ws, 'done');
+    await waitForSentEvent(ws, 'turn.done');
     ws.close();
     await run;
 
@@ -185,7 +187,6 @@ describe('ChatStreamHandler thinking routing', () => {
     const ws = new FakeWebSocket();
 
     const run = handler.handle(ws as unknown as WebSocket, {
-      sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
       authUserId: 'dev-user',
       correlationId: 'turn-1',
     });
@@ -194,7 +195,7 @@ describe('ChatStreamHandler thinking routing', () => {
       ws.emit('message', submitTurnMessage({ forceThinking: true }));
     });
 
-    await waitForSentEvent(ws, 'done');
+    await waitForSentEvent(ws, 'turn.done');
     ws.close();
     await run;
 
@@ -235,19 +236,18 @@ describe('ChatStreamHandler thinking routing', () => {
     const ws = new FakeWebSocket();
 
     const run = handler.handle(ws as unknown as WebSocket, {
-      sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
       authUserId: 'dev-user',
       correlationId: 'turn-1',
     });
 
     ws.emit('message', submitTurnMessage({ includeDiagnostics: true }));
-    await waitForSentEvent(ws, 'done');
+    await waitForSentEvent(ws, 'turn.done');
     const sentAfterFirstTurn = ws.sent.length;
     expect(ws.readyState).toBe(WebSocket.OPEN);
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     ws.emit('message', submitTurnMessage({ includeDiagnostics: true }));
-    await waitForSentEvent(ws, 'done', 2);
+    await waitForSentEvent(ws, 'turn.done', 2);
     ws.close();
     await run;
 

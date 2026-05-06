@@ -10,68 +10,35 @@ import { validate } from 'class-validator';
 import WebSocket from 'ws';
 import { SERVICE_CONFIG } from '../config/config';
 import type { ServiceConfig } from '../config/config';
-import { buildMeta } from '../common/meta.util';
-import type { ApiMeta } from '../common/meta.util';
 import { LlmHostService } from '../llm-host/llm-host.service';
-import type { QueueWaitInfo } from '../llm-host/llm-host.service';
 import type { RetrievalStreamEvent } from '../rag/rag.service';
 import { ChatService } from './chat.service';
 import type { PersistedTurn, PreparedTurn } from './chat.service';
+import { CreateSessionDto } from './dto/create-session.dto';
 import { SubmitTurnDto } from './dto/submit-turn.dto';
 
 interface ConnectionContext {
-  sessionId: string;
   authUserId: string;
   correlationId: string;
 }
 
-interface SubmittedTurn {
+interface V4Envelope {
+  type: string;
   correlationId: string;
-  dto: SubmitTurnDto;
+  payload?: unknown;
+  error?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+    details?: Record<string, unknown>;
+  };
 }
 
-type ChatStreamEvent =
-  | { type: 'accepted'; meta: ApiMeta }
-  | { type: 'queued'; meta: ApiMeta; data: QueueWaitInfo }
-  | { type: 'started'; meta: ApiMeta }
-  | { type: 'retrieval'; meta: ApiMeta; data: RetrievalStreamEvent }
-  | { type: 'thinking'; meta: ApiMeta; data: { text: string } }
-  | { type: 'chunk'; meta: ApiMeta; data: { text: string } }
-  | {
-      type: 'done';
-      meta: ApiMeta;
-      data: {
-        sessionId: string;
-        turnId: string;
-        assistantMessage: {
-          messageId: string;
-          content: string;
-          createdAt: string;
-        };
-        finishReason: 'stop' | 'length' | 'error';
-        citations?: Array<{
-          evidenceId: string;
-          sourceTitle: string;
-          sourceUrl?: string;
-        }>;
-        diagnostics?: {
-          retrievalUsed: boolean;
-          memoryFragmentCount: number;
-          retrievalMode: string;
-          turnRoute: string;
-          shouldRetrieve: boolean;
-          shouldThink: boolean;
-          intent: string;
-          freshness: string;
-          planReason: string;
-        };
-      };
-    }
-  | {
-      type: 'error';
-      meta: ApiMeta;
-      error: { code: string; message: string; retryable: boolean };
-    };
+interface SubmittedTurn {
+  correlationId: string;
+  sessionId: string;
+  dto: SubmitTurnDto;
+}
 
 function rawToString(raw: WebSocket.RawData): string {
   if (typeof raw === 'string') return raw;
@@ -80,15 +47,10 @@ function rawToString(raw: WebSocket.RawData): string {
   return Buffer.from(raw).toString('utf8');
 }
 
-/**
- * Per-connection orchestration for /v2/chat/sessions/:sessionId/turns/stream.
- *
- * The socket is session-scoped and persistent. Clients may send multiple
- * submit_turn messages over the same WebSocket. The orchestrator processes one
- * turn at a time, streams accepted/retrieval/queued/started/thinking/chunk
- * events for that turn, persists user + assistant messages after generation,
- * then emits done and keeps the socket open for the next turn.
- */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 @Injectable()
 export class ChatStreamHandler {
   private readonly log = new Logger(ChatStreamHandler.name);
@@ -100,56 +62,79 @@ export class ChatStreamHandler {
   ) {}
 
   async handle(ws: WebSocket, ctx: ConnectionContext): Promise<void> {
-    try {
-      this.chat.assertSessionOwnership(ctx.sessionId, ctx.authUserId);
-    } catch (err) {
-      this.sendError(
-        ws,
-        err instanceof HttpException ? err.getStatus() : 500,
-        err instanceof Error ? err.message : 'Session ownership check failed',
-        ctx.correlationId,
-        true,
-      );
-      return;
-    }
-
-    let inFlight = false;
+    let inFlightTurn = false;
+    let activeTurnAbort: AbortController | null = null;
 
     ws.on('message', (raw: WebSocket.RawData) => {
-      let submitted: SubmittedTurn;
+      let envelope: V4Envelope;
       try {
-        submitted = this.parseSubmitTurn(raw);
+        envelope = this.parseEnvelope(raw);
       } catch (err) {
         this.sendError(
           ws,
-          400,
-          err instanceof Error ? err.message : 'Invalid submit_turn message',
           ctx.correlationId,
-          false,
+          400,
+          err instanceof Error ? err.message : 'Invalid message',
         );
         return;
       }
 
-      if (inFlight) {
-        this.sendError(
-          ws,
-          409,
-          'A turn is already in progress on this session WebSocket',
-          submitted.correlationId,
-          false,
-        );
-        return;
-      }
-
-      inFlight = true;
-      void this.processTurn(ws, ctx, submitted)
-        .catch((err: Error) => {
-          this.log.error(`processTurn crashed: ${err.message}`, err.stack);
-          this.sendError(ws, 500, err.message, submitted.correlationId, false);
-        })
-        .finally(() => {
-          inFlight = false;
+      if (envelope.type === 'heartbeat') {
+        this.send(ws, {
+          type: 'heartbeat',
+          correlationId: envelope.correlationId,
+          payload: { receivedAt: new Date().toISOString() },
         });
+        return;
+      }
+
+      if (envelope.type === 'cancel') {
+        activeTurnAbort?.abort();
+        return;
+      }
+
+      if (envelope.type === 'turn.submit') {
+        if (inFlightTurn) {
+          this.sendError(
+            ws,
+            envelope.correlationId,
+            409,
+            'A turn is already in progress on this chat WebSocket',
+          );
+          return;
+        }
+
+        let submitted: SubmittedTurn;
+        try {
+          submitted = this.parseSubmittedTurn(envelope);
+        } catch (err) {
+          this.sendError(
+            ws,
+            envelope.correlationId,
+            400,
+            err instanceof Error ? err.message : 'Invalid turn.submit payload',
+          );
+          return;
+        }
+
+        inFlightTurn = true;
+        void this.processTurn(ws, ctx, submitted, (abort) => {
+          activeTurnAbort = abort;
+        })
+          .catch((err: Error) => {
+            this.log.error(`processTurn crashed: ${err.message}`, err.stack);
+            this.sendError(ws, envelope.correlationId, 500, err.message);
+          })
+          .finally(() => {
+            activeTurnAbort = null;
+            inFlightTurn = false;
+          });
+        return;
+      }
+
+      void this.processControlMessage(ws, ctx, envelope).catch((err: Error) => {
+        this.sendError(ws, envelope.correlationId, 500, err.message);
+      });
     });
 
     await new Promise<void>((resolve) => {
@@ -157,38 +142,108 @@ export class ChatStreamHandler {
     });
   }
 
+  private async processControlMessage(
+    ws: WebSocket,
+    ctx: ConnectionContext,
+    envelope: V4Envelope,
+  ): Promise<void> {
+    if (envelope.type === 'health.get') {
+      this.send(ws, {
+        type: 'health',
+        correlationId: envelope.correlationId,
+        payload: {
+          status: 'ok',
+          ready: true,
+          checkedAt: new Date().toISOString(),
+        },
+      });
+      return;
+    }
+
+    if (envelope.type === 'session.create') {
+      const dto = plainToInstance(
+        CreateSessionDto,
+        this.requirePayloadRequest(envelope),
+      );
+      await this.validateDto(dto);
+      const res = this.chat.createSession({
+        dto,
+        correlationId: envelope.correlationId,
+        authUserId: ctx.authUserId,
+      });
+      this.send(ws, {
+        type: 'session.created',
+        correlationId: envelope.correlationId,
+        payload: res.data,
+      });
+      return;
+    }
+
+    if (envelope.type === 'session.get') {
+      const sessionId = this.requireSessionId(envelope);
+      const res = this.chat.getSession({
+        sessionId,
+        correlationId: envelope.correlationId,
+        authUserId: ctx.authUserId,
+      });
+      this.send(ws, {
+        type: 'session.snapshot',
+        correlationId: envelope.correlationId,
+        payload: res.data,
+      });
+      return;
+    }
+
+    if (envelope.type === 'session.delete') {
+      const sessionId = this.requireSessionId(envelope);
+      const res = this.chat.deleteSession({
+        sessionId,
+        correlationId: envelope.correlationId,
+        authUserId: ctx.authUserId,
+      });
+      this.send(ws, {
+        type: 'session.deleted',
+        correlationId: envelope.correlationId,
+        payload: res.data,
+      });
+      return;
+    }
+
+    this.sendError(
+      ws,
+      envelope.correlationId,
+      400,
+      `Unsupported message type: ${envelope.type}`,
+    );
+  }
+
   private async processTurn(
     ws: WebSocket,
     ctx: ConnectionContext,
     submitted: SubmittedTurn,
+    setActiveAbort: (abort: AbortController) => void,
   ): Promise<void> {
-    const { correlationId, dto } = submitted;
-    const meta = (): ApiMeta => buildMeta(correlationId, this.cfg.apiVersion);
-    const send = (event: ChatStreamEvent): void => this.send(ws, event);
+    const { correlationId, dto, sessionId } = submitted;
+    const send = (type: string, payload: unknown = {}): void =>
+      this.send(ws, { type, correlationId, payload });
     let cleanupAbort = (): void => undefined;
     const failTurn = (status: number, message: string): void => {
       cleanupAbort();
-      send({
-        type: 'error',
-        meta: meta(),
-        error: {
-          code: this.codeFor(status),
-          message,
-          retryable: status >= 500 || status === 429,
-        },
-      });
+      this.sendError(ws, correlationId, status, message);
     };
 
     try {
-      await this.validateSubmitTurn(dto);
+      await this.validateDto(dto);
     } catch (err) {
       failTurn(400, err instanceof Error ? err.message : 'Invalid turn');
       return;
     }
 
-    send({ type: 'accepted', meta: meta() });
+    send('turn.accepted');
+    send('turn.classifying');
 
     const abort = new AbortController();
+    setActiveAbort(abort);
     const onClose = (): void => abort.abort();
     cleanupAbort = (): void => {
       ws.off('close', onClose);
@@ -198,13 +253,13 @@ export class ChatStreamHandler {
     let prepared: PreparedTurn;
     try {
       prepared = await this.chat.prepareTurn({
-        sessionId: ctx.sessionId,
+        sessionId,
         dto,
         correlationId,
         authUserId: ctx.authUserId,
         abortSignal: abort.signal,
-        onRagStreamEvent: (event) => {
-          send({ type: 'retrieval', meta: meta(), data: event });
+        onRagStreamEvent: (event: RetrievalStreamEvent) => {
+          send('turn.retrieval', { event });
         },
       });
     } catch (err) {
@@ -229,16 +284,16 @@ export class ChatStreamHandler {
         onEvent: (evt) => {
           switch (evt.type) {
             case 'queued':
-              send({ type: 'queued', meta: meta(), data: evt.data });
+              send('turn.queued', evt.payload);
               break;
             case 'started':
-              send({ type: 'started', meta: meta() });
+              send('turn.started');
               break;
             case 'thinking':
-              send({ type: 'thinking', meta: meta(), data: evt.data });
+              send('turn.thinking', evt.payload);
               break;
             case 'chunk':
-              send({ type: 'chunk', meta: meta(), data: evt.data });
+              send('turn.chunk', evt.payload);
               break;
             default:
               break;
@@ -266,7 +321,7 @@ export class ChatStreamHandler {
     let persisted: PersistedTurn;
     try {
       persisted = this.chat.persistTurn({
-        sessionId: ctx.sessionId,
+        sessionId,
         parts: dto.message.parts,
         userText: prepared.userText,
         occurredAt: dto.message.occurredAt,
@@ -279,79 +334,111 @@ export class ChatStreamHandler {
     }
 
     cleanupAbort();
-    send({
-      type: 'done',
-      meta: meta(),
-      data: {
-        sessionId: ctx.sessionId,
-        turnId: persisted.turnId,
-        assistantMessage: {
-          messageId: persisted.assistantMessageId,
-          content: assistantText,
-          createdAt: persisted.createdAt,
-        },
-        finishReason,
-        citations: prepared.ragContext.evidence.map((e) => ({
-          evidenceId: e.evidenceId,
-          sourceTitle: e.sourceTitle,
-          ...(e.sourceUrl ? { sourceUrl: e.sourceUrl } : {}),
-        })),
-        ...(dto.options?.includeDiagnostics === true
-          ? {
-              diagnostics: {
-                retrievalUsed: prepared.ragContext.retrievalUsed,
-                memoryFragmentCount: prepared.memoryFragments.length,
-                retrievalMode: prepared.ragContext.retrievalMode,
-                turnRoute: prepared.turnPlan.route,
-                shouldRetrieve: prepared.turnPlan.shouldRetrieve,
-                shouldThink: prepared.turnPlan.shouldThink,
-                intent: prepared.turnPlan.intent,
-                freshness: prepared.turnPlan.freshness,
-                planReason: prepared.turnPlan.planReason,
-              },
-            }
-          : {}),
+    send('turn.done', {
+      sessionId,
+      turnId: persisted.turnId,
+      assistantMessage: {
+        messageId: persisted.assistantMessageId,
+        content: assistantText,
+        createdAt: persisted.createdAt,
       },
+      finishReason,
+      citations: prepared.ragContext.evidence.map((e) => ({
+        evidenceId: e.evidenceId,
+        sourceTitle: e.sourceTitle,
+        ...(e.sourceUrl ? { sourceUrl: e.sourceUrl } : {}),
+      })),
+      ...(dto.options?.includeDiagnostics === true
+        ? {
+            diagnostics: {
+              retrievalUsed: prepared.ragContext.retrievalUsed,
+              memoryFragmentCount: prepared.memoryFragments.length,
+              retrievalMode: prepared.ragContext.retrievalMode,
+              turnRoute: prepared.turnPlan.route,
+              shouldRetrieve: prepared.turnPlan.shouldRetrieve,
+              shouldThink: prepared.turnPlan.shouldThink,
+              intent: prepared.turnPlan.intent,
+              freshness: prepared.turnPlan.freshness,
+              planReason: prepared.turnPlan.planReason,
+            },
+          }
+        : {}),
     });
   }
 
-  private parseSubmitTurn(raw: WebSocket.RawData): SubmittedTurn {
+  private parseEnvelope(raw: WebSocket.RawData): V4Envelope {
     let parsed: unknown;
     try {
       parsed = JSON.parse(rawToString(raw));
     } catch {
       throw new Error('message must be JSON');
     }
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      (parsed as { type?: unknown }).type !== 'submit_turn' ||
-      typeof (parsed as { request?: unknown }).request !== 'object' ||
-      (parsed as { request?: unknown }).request === null
-    ) {
-      throw new Error(
-        'message must be { type: "submit_turn", correlationId, request }',
-      );
+    if (!isRecord(parsed)) {
+      throw new Error('message must be an object');
     }
-
+    if (typeof parsed.type !== 'string' || !parsed.type.trim()) {
+      throw new Error('message.type is required');
+    }
     const correlationId =
-      typeof (parsed as { correlationId?: unknown }).correlationId === 'string'
-        ? (parsed as { correlationId: string }).correlationId.trim()
+      typeof parsed.correlationId === 'string'
+        ? parsed.correlationId.trim()
         : '';
     if (!correlationId) {
-      throw new Error('submit_turn.correlationId is required');
+      throw new Error('message.correlationId is required');
     }
 
     return {
+      type: parsed.type.trim(),
       correlationId,
-      dto: plainToInstance(
-        SubmitTurnDto,
-        (parsed as { request: unknown }).request,
-      ),
+      payload: parsed.payload,
     };
   }
 
-  private async validateSubmitTurn(dto: SubmitTurnDto): Promise<void> {
+  private parseSubmittedTurn(envelope: V4Envelope): SubmittedTurn {
+    if (!isRecord(envelope.payload)) {
+      throw new Error('turn.submit payload is required');
+    }
+
+    const sessionId =
+      typeof envelope.payload.sessionId === 'string'
+        ? envelope.payload.sessionId.trim()
+        : '';
+    if (!sessionId) {
+      throw new Error('turn.submit payload.sessionId is required');
+    }
+    if (!isRecord(envelope.payload.request)) {
+      throw new Error('turn.submit payload.request is required');
+    }
+
+    return {
+      correlationId: envelope.correlationId,
+      sessionId,
+      dto: plainToInstance(SubmitTurnDto, envelope.payload.request),
+    };
+  }
+
+  private requirePayloadRequest(envelope: V4Envelope): unknown {
+    if (!isRecord(envelope.payload) || !isRecord(envelope.payload.request)) {
+      throw new Error(`${envelope.type} payload.request is required`);
+    }
+    return envelope.payload.request;
+  }
+
+  private requireSessionId(envelope: V4Envelope): string {
+    if (!isRecord(envelope.payload)) {
+      throw new Error(`${envelope.type} payload is required`);
+    }
+    const sessionId =
+      typeof envelope.payload.sessionId === 'string'
+        ? envelope.payload.sessionId.trim()
+        : '';
+    if (!sessionId) {
+      throw new Error(`${envelope.type} payload.sessionId is required`);
+    }
+    return sessionId;
+  }
+
+  private async validateDto(dto: object): Promise<void> {
     const errors = await validate(dto, {
       whitelist: true,
       forbidNonWhitelisted: true,
@@ -360,11 +447,11 @@ export class ChatStreamHandler {
       const detail = errors
         .map((e) => Object.values(e.constraints ?? {}).join(', '))
         .join('; ');
-      throw new Error(`invalid SubmitTurnRequest: ${detail}`);
+      throw new Error(`invalid request: ${detail}`);
     }
   }
 
-  private send(ws: WebSocket, event: ChatStreamEvent): void {
+  private send(ws: WebSocket, event: V4Envelope): void {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(event));
     }
@@ -372,27 +459,19 @@ export class ChatStreamHandler {
 
   private sendError(
     ws: WebSocket,
+    correlationId: string,
     status: number,
     message: string,
-    correlationId: string,
-    close: boolean,
   ): void {
     this.send(ws, {
       type: 'error',
-      meta: buildMeta(correlationId, this.cfg.apiVersion),
+      correlationId,
       error: {
         code: this.codeFor(status),
         message,
         retryable: status >= 500 || status === 429,
       },
     });
-    if (close) {
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
-    }
   }
 
   private codeFor(status: number): string {

@@ -1,4 +1,10 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
 import WebSocket from 'ws';
 import { SERVICE_CONFIG } from '../config/config';
 import type { ServiceConfig } from '../config/config';
@@ -88,10 +94,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 @Injectable()
-export class RagService {
+export class RagService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(RagService.name);
+  private client?: PersistentRagSocket;
 
   constructor(@Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig) {}
+
+  onModuleInit(): void {
+    if (this.cfg.rag.enabled && this.cfg.rag.baseUrl) {
+      void this.clientFor()
+        .connect()
+        .catch((err: Error) => {
+          this.log.warn(
+            `RAG Engine persistent socket unavailable at startup: ${err.message}`,
+          );
+        });
+    }
+  }
+
+  onModuleDestroy(): void {
+    this.client?.close();
+    this.client = undefined;
+  }
 
   async retrieve(inquiry: RagInquiry): Promise<RagContext> {
     if (!this.cfg.rag.enabled) {
@@ -104,7 +128,13 @@ export class RagService {
     }
 
     try {
-      return await this.retrieveViaWebSocket(inquiry);
+      return await this.clientFor().retrieve({
+        correlationId: inquiry.correlationId,
+        request: this.buildRetrieveRequest(inquiry),
+        timeoutMs: this.cfg.rag.timeoutMs,
+        onStreamEvent: inquiry.onStreamEvent,
+        abortSignal: inquiry.abortSignal,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log.warn(
@@ -122,95 +152,6 @@ export class RagService {
 
       return this.emptyContext();
     }
-  }
-
-  private retrieveViaWebSocket(inquiry: RagInquiry): Promise<RagContext> {
-    const ws = new WebSocket(this.streamUrl(), {
-      headers: { 'x-correlation-id': inquiry.correlationId },
-    });
-    const request = this.buildRetrieveRequest(inquiry);
-
-    let settled = false;
-
-    return new Promise<RagContext>((resolve, reject) => {
-      const settle = (fn: () => void): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        inquiry.abortSignal?.removeEventListener('abort', onAbort);
-        try {
-          ws.close();
-        } catch {
-          /* ignore */
-        }
-        fn();
-      };
-
-      const timer = setTimeout(() => {
-        settle(() => reject(new Error('RAG Engine stream timeout')));
-      }, this.cfg.rag.timeoutMs);
-
-      const onAbort = (): void => {
-        settle(() => reject(new Error('aborted')));
-      };
-      inquiry.abortSignal?.addEventListener('abort', onAbort, { once: true });
-
-      ws.on('open', () => {
-        ws.send(
-          JSON.stringify({
-            type: 'retrieve_evidence',
-            correlationId: inquiry.correlationId,
-            request,
-          }),
-        );
-      });
-
-      ws.on('message', (raw: WebSocket.RawData) => {
-        let event: RetrievalStreamEvent;
-        try {
-          const parsed: unknown = JSON.parse(rawToString(raw));
-          if (!this.isRetrievalStreamEvent(parsed)) {
-            this.log.warn('RAG Engine emitted a malformed stream event');
-            return;
-          }
-          event = parsed;
-        } catch {
-          this.log.warn('RAG Engine emitted non-JSON stream data');
-          return;
-        }
-
-        try {
-          inquiry.onStreamEvent?.(event);
-        } catch (error) {
-          this.log.warn(
-            `RAG stream event handler threw: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
-
-        if (event.type === 'retrieval.completed') {
-          const data = isRecord(event.data) ? event.data.retrieval : undefined;
-          settle(() => resolve(this.mapRetrievedContext(data)));
-        } else if (event.type === 'retrieval.failed') {
-          const message =
-            isRecord(event.data) && typeof event.data.message === 'string'
-              ? event.data.message
-              : 'RAG Engine retrieval failed';
-          settle(() => reject(new RagStreamFailedError(message)));
-        }
-      });
-
-      ws.on('error', (error: Error) => {
-        settle(() => reject(error));
-      });
-
-      ws.on('close', () => {
-        settle(() =>
-          reject(new Error('RAG Engine closed stream before completion')),
-        );
-      });
-    });
   }
 
   private buildRetrieveRequest(inquiry: RagInquiry) {
@@ -276,32 +217,304 @@ export class RagService {
     return 'none';
   }
 
-  private isRetrievalStreamEvent(
-    value: unknown,
-  ): value is RetrievalStreamEvent {
-    return (
-      isRecord(value) &&
-      typeof value.type === 'string' &&
-      Number.isInteger(value.sequence) &&
-      typeof value.occurredAt === 'string' &&
-      isRecord(value.data)
-    );
-  }
-
-  private streamUrl(): string {
-    return (
-      this.cfg.rag
-        .baseUrl!.replace(/^http:/i, 'ws:')
-        .replace(/^https:/i, 'wss:')
-        .replace(/\/$/, '') + '/v2/retrieval/evidence/stream'
-    );
-  }
-
   private emptyContext(): RagContext {
     return {
       retrievalUsed: false,
       retrievalMode: 'none',
       evidence: [],
     };
+  }
+
+  private clientFor(): PersistentRagSocket {
+    if (this.client) return this.client;
+    this.client = new PersistentRagSocket(
+      this.cfg.rag.baseUrl!,
+      this.cfg.rag.timeoutMs,
+      this.log,
+      (value) => this.mapRetrievedContext(value),
+    );
+    return this.client;
+  }
+}
+
+interface PersistentRagRequest {
+  correlationId: string;
+  request: unknown;
+  timeoutMs: number;
+  onStreamEvent?: (event: RetrievalStreamEvent) => void;
+  abortSignal?: AbortSignal;
+}
+
+interface PendingRagRequest {
+  timer: NodeJS.Timeout;
+  onStreamEvent?: (event: RetrievalStreamEvent) => void;
+  resolve: (result: RagContext) => void;
+  reject: (error: Error) => void;
+  abortSignal?: AbortSignal;
+  onAbort?: () => void;
+}
+
+interface RawRagEnvelope {
+  type?: unknown;
+  correlationId?: unknown;
+  payload?: unknown;
+  error?: { message?: string; retryable?: boolean };
+}
+
+class PersistentRagSocket {
+  private ws?: WebSocket;
+  private connecting?: Promise<void>;
+  private reconnectTimer?: NodeJS.Timeout;
+  private closing = false;
+  private readonly pending = new Map<string, PendingRagRequest>();
+
+  constructor(
+    private readonly baseUrl: string,
+    private readonly defaultTimeoutMs: number,
+    private readonly log: Logger,
+    private readonly mapRetrievedContext: (value: unknown) => RagContext,
+  ) {}
+
+  async connect(): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN) return;
+    if (this.connecting) return this.connecting;
+
+    this.closing = false;
+    this.connecting = new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(this.streamUrl());
+      let settled = false;
+      const settle = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        fn();
+      };
+      const timer = setTimeout(() => {
+        settle(() => {
+          try {
+            ws.close();
+          } catch {
+            /* ignore */
+          }
+          reject(new Error('RAG Engine persistent socket connect timeout'));
+        });
+      }, this.defaultTimeoutMs);
+
+      ws.on('open', () => {
+        this.ws = ws;
+        this.attachSocketHandlers(ws);
+        settle(resolve);
+      });
+
+      ws.on('error', (err: Error) => {
+        settle(() => reject(err));
+      });
+
+      ws.on('close', () => {
+        settle(() => reject(new Error('RAG Engine persistent socket closed')));
+      });
+    }).finally(() => {
+      this.connecting = undefined;
+    });
+
+    return this.connecting;
+  }
+
+  close(): void {
+    this.closing = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.failAll(new Error('RAG Engine persistent socket closed'));
+    try {
+      this.ws?.close();
+    } catch {
+      /* ignore */
+    }
+    this.ws = undefined;
+  }
+
+  async retrieve(args: PersistentRagRequest): Promise<RagContext> {
+    await this.connect();
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error('RAG Engine persistent socket unavailable');
+    }
+
+    return new Promise<RagContext>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.rejectPending(
+          args.correlationId,
+          new Error('RAG Engine stream timeout'),
+        );
+      }, args.timeoutMs || this.defaultTimeoutMs);
+
+      const onAbort = (): void => {
+        this.sendCancel(args.correlationId);
+        this.rejectPending(args.correlationId, new Error('aborted'));
+      };
+      args.abortSignal?.addEventListener('abort', onAbort, { once: true });
+
+      this.pending.set(args.correlationId, {
+        timer,
+        onStreamEvent: args.onStreamEvent,
+        resolve,
+        reject,
+        abortSignal: args.abortSignal,
+        onAbort,
+      });
+
+      try {
+        ws.send(
+          JSON.stringify({
+            type: 'retrieve_evidence',
+            correlationId: args.correlationId,
+            payload: { request: args.request },
+          }),
+        );
+      } catch (error) {
+        this.rejectPending(
+          args.correlationId,
+          error instanceof Error ? error : new Error('RAG Engine send failed'),
+        );
+      }
+    });
+  }
+
+  private attachSocketHandlers(ws: WebSocket): void {
+    ws.on('message', (raw: WebSocket.RawData) => this.handleMessage(raw));
+    ws.on('error', (err: Error) => {
+      this.log.error(`RAG Engine persistent WS error: ${err.message}`);
+    });
+    ws.on('close', () => {
+      if (this.ws === ws) this.ws = undefined;
+      this.failAll(new Error('RAG Engine persistent socket closed'));
+      this.scheduleReconnect();
+    });
+  }
+
+  private handleMessage(raw: WebSocket.RawData): void {
+    let envelope: RawRagEnvelope;
+    try {
+      envelope = JSON.parse(rawToString(raw)) as RawRagEnvelope;
+    } catch {
+      this.log.warn('RAG Engine emitted non-JSON stream data');
+      return;
+    }
+
+    const correlationId =
+      typeof envelope.correlationId === 'string' ? envelope.correlationId : '';
+    if (!correlationId) return;
+    const pending = this.pending.get(correlationId);
+    if (!pending) return;
+
+    if (envelope.type === 'error') {
+      this.rejectPending(
+        correlationId,
+        new Error(envelope.error?.message ?? 'RAG Engine stream error'),
+      );
+      return;
+    }
+
+    const event = this.toRetrievalEvent(envelope);
+    if (!event) return;
+
+    try {
+      pending.onStreamEvent?.(event);
+    } catch (error) {
+      this.log.warn(
+        `RAG stream event handler threw: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    if (event.type === 'retrieval.completed') {
+      const data = isRecord(event.data) ? event.data.retrieval : undefined;
+      this.resolvePending(correlationId, this.mapRetrievedContext(data));
+    } else if (event.type === 'retrieval.failed') {
+      const message =
+        isRecord(event.data) && typeof event.data.message === 'string'
+          ? event.data.message
+          : 'RAG Engine retrieval failed';
+      this.rejectPending(correlationId, new RagStreamFailedError(message));
+    }
+  }
+
+  private toRetrievalEvent(
+    envelope: RawRagEnvelope,
+  ): RetrievalStreamEvent | null {
+    if (typeof envelope.type !== 'string' || !isRecord(envelope.payload)) {
+      return null;
+    }
+    return {
+      type: envelope.type,
+      sequence:
+        typeof envelope.payload.sequence === 'number'
+          ? envelope.payload.sequence
+          : 0,
+      occurredAt:
+        typeof envelope.payload.occurredAt === 'string'
+          ? envelope.payload.occurredAt
+          : new Date().toISOString(),
+      data: isRecord(envelope.payload.data) ? envelope.payload.data : {},
+    };
+  }
+
+  private resolvePending(correlationId: string, result: RagContext): void {
+    const pending = this.pending.get(correlationId);
+    if (!pending) return;
+    this.cleanupPending(correlationId, pending);
+    pending.resolve(result);
+  }
+
+  private rejectPending(correlationId: string, error: Error): void {
+    const pending = this.pending.get(correlationId);
+    if (!pending) return;
+    this.cleanupPending(correlationId, pending);
+    pending.reject(error);
+  }
+
+  private cleanupPending(
+    correlationId: string,
+    pending: PendingRagRequest,
+  ): void {
+    this.pending.delete(correlationId);
+    clearTimeout(pending.timer);
+    if (pending.onAbort) {
+      pending.abortSignal?.removeEventListener('abort', pending.onAbort);
+    }
+  }
+
+  private failAll(error: Error): void {
+    for (const [correlationId, pending] of this.pending) {
+      this.cleanupPending(correlationId, pending);
+      pending.reject(error);
+    }
+  }
+
+  private sendCancel(correlationId: string): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type: 'cancel', correlationId }));
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closing || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      void this.connect().catch((err: Error) => {
+        this.log.warn(
+          `RAG Engine persistent socket reconnect failed (${this.baseUrl}): ${err.message}`,
+        );
+        this.scheduleReconnect();
+      });
+    }, 1000);
+  }
+
+  private streamUrl(): string {
+    return (
+      this.baseUrl
+        .replace(/^http:/i, 'ws:')
+        .replace(/^https:/i, 'wss:')
+        .replace(/\/$/, '') + '/v4/retrieval'
+    );
   }
 }

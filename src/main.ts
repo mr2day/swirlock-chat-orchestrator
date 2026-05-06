@@ -10,8 +10,7 @@ import { ChatStreamHandler } from './chat/chat-stream.handler';
 import { SERVICE_CONFIG } from './config/config';
 import type { ServiceConfig } from './config/config';
 
-const STREAM_PATH_RE =
-  /^\/v2\/chat\/sessions\/([0-9a-fA-F-]{36})\/turns\/stream$/;
+const STREAM_PATH = '/v4/chat';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
@@ -51,7 +50,7 @@ async function bootstrap(): Promise<void> {
     'Bootstrap',
   );
   Logger.log(
-    `Stream WS path: ws://${cfg.host}:${cfg.port}/v2/chat/sessions/:sessionId/turns/stream`,
+    `Stream WS path: ws://${cfg.host}:${cfg.port}${STREAM_PATH}`,
     'Bootstrap',
   );
 }
@@ -67,8 +66,7 @@ function attachStreamServer(
   httpServer.on('upgrade', (req, socket, head) => {
     const url = req.url ?? '';
     const pathOnly = url.split('?')[0];
-    const match = STREAM_PATH_RE.exec(pathOnly);
-    if (!match) {
+    if (pathOnly !== STREAM_PATH) {
       socket.destroy();
       return;
     }
@@ -80,7 +78,6 @@ function attachStreamServer(
       return;
     }
 
-    const sessionId = match[1];
     const incomingCorrelation = req.headers['x-correlation-id'];
     const correlationId =
       typeof incomingCorrelation === 'string' && incomingCorrelation.length > 0
@@ -92,7 +89,6 @@ function attachStreamServer(
     wss.handleUpgrade(req, socket, head, (ws) => {
       void handler
         .handle(ws, {
-          sessionId,
           authUserId: cfg.devUser.userId,
           correlationId,
         })

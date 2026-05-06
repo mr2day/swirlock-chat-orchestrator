@@ -9,7 +9,6 @@ import {
 import WebSocket from 'ws';
 import { SERVICE_CONFIG } from '../config/config';
 import type { ServiceConfig } from '../config/config';
-import type { ApiMeta } from '../common/meta.util';
 
 function rawToString(raw: WebSocket.RawData): string {
   if (typeof raw === 'string') return raw;
@@ -45,22 +44,20 @@ export interface QueueWaitInfo {
 }
 
 export type LlmStreamEvent =
-  | { type: 'accepted'; meta: ApiMeta }
-  | { type: 'queued'; meta: ApiMeta; data: QueueWaitInfo }
-  | { type: 'started'; meta: ApiMeta }
-  | { type: 'thinking'; meta: ApiMeta; data: { text: string } }
-  | { type: 'chunk'; meta: ApiMeta; data: { text: string } }
+  | { type: 'accepted'; payload: Record<string, never> }
+  | { type: 'queued'; payload: QueueWaitInfo }
+  | { type: 'started'; payload: Record<string, never> }
+  | { type: 'thinking'; payload: { text: string } }
+  | { type: 'chunk'; payload: { text: string } }
   | {
       type: 'done';
-      meta: ApiMeta;
-      data: {
+      payload: {
         finishReason: 'stop' | 'length' | 'error';
         appliedOptions?: LlmInferOptions;
       };
     }
   | {
       type: 'error';
-      meta: ApiMeta;
       error: { code: string; message: string; retryable: boolean };
     };
 
@@ -102,7 +99,7 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Sends one inference request over the persistent upstream Model Host
-   * WebSocket at /v2/infer/stream. Callers that need live UI updates provide
+   * WebSocket at /v4/model. Callers that need live UI updates provide
    * `onEvent`; callers such as the Utility turn classifier can omit it and just
    * read the assembled response text.
    */
@@ -215,7 +212,12 @@ interface PendingInferRequest {
   onAbort?: () => void;
 }
 
-type CorrelatedLlmStreamEvent = LlmStreamEvent & { correlationId?: string };
+interface RawLlmEnvelope {
+  type?: unknown;
+  correlationId?: unknown;
+  payload?: unknown;
+  error?: { code?: string; message?: string; retryable?: boolean };
+}
 
 class PersistentModelHostSocket {
   private ws?: WebSocket;
@@ -347,7 +349,7 @@ class PersistentModelHostSocket {
           JSON.stringify({
             type: 'infer',
             correlationId: args.correlationId,
-            request: args.request,
+            payload: { request: args.request },
           }),
         );
       } catch (error) {
@@ -378,15 +380,16 @@ class PersistentModelHostSocket {
   }
 
   private handleMessage(raw: WebSocket.RawData): void {
-    let evt: CorrelatedLlmStreamEvent;
+    let rawEvent: RawLlmEnvelope;
     try {
-      evt = JSON.parse(rawToString(raw)) as CorrelatedLlmStreamEvent;
+      rawEvent = JSON.parse(rawToString(raw)) as RawLlmEnvelope;
     } catch {
       this.log.warn('LLM Host emitted non-JSON stream message');
       return;
     }
 
-    const correlationId = evt.correlationId ?? evt.meta?.correlationId;
+    const correlationId =
+      typeof rawEvent.correlationId === 'string' ? rawEvent.correlationId : '';
     if (!correlationId) {
       this.log.warn('LLM Host emitted stream event without correlationId');
       return;
@@ -394,6 +397,11 @@ class PersistentModelHostSocket {
 
     const pending = this.pending.get(correlationId);
     if (!pending) return;
+    const evt = this.normalizeEvent(rawEvent);
+    if (!evt) {
+      this.log.warn('LLM Host emitted malformed stream event');
+      return;
+    }
 
     try {
       pending.onEvent?.(evt);
@@ -405,16 +413,16 @@ class PersistentModelHostSocket {
       );
     }
 
-    if (evt.type === 'chunk' && evt.data?.text) {
-      pending.text += evt.data.text;
+    if (evt.type === 'chunk' && evt.payload.text) {
+      pending.text += evt.payload.text;
     }
 
     if (evt.type === 'done') {
       this.resolvePending(correlationId, {
-        finishReason: this.normalizeFinishReason(evt.data.finishReason),
+        finishReason: this.normalizeFinishReason(evt.payload.finishReason),
         text: pending.text,
-        ...(evt.data.appliedOptions
-          ? { appliedOptions: evt.data.appliedOptions }
+        ...(evt.payload.appliedOptions
+          ? { appliedOptions: evt.payload.appliedOptions }
           : {}),
       });
     }
@@ -492,7 +500,56 @@ class PersistentModelHostSocket {
       this.baseUrl
         .replace(/^http:/i, 'ws:')
         .replace(/^https:/i, 'wss:')
-        .replace(/\/$/, '') + '/v2/infer/stream'
+        .replace(/\/$/, '') + '/v4/model'
     );
   }
+
+  private normalizeEvent(raw: RawLlmEnvelope): LlmStreamEvent | null {
+    if (typeof raw.type !== 'string') return null;
+    const payload = isRecord(raw.payload) ? raw.payload : {};
+
+    switch (raw.type) {
+      case 'accepted':
+      case 'started':
+        return { type: raw.type, payload: {} };
+      case 'queued':
+        return { type: 'queued', payload: payload as unknown as QueueWaitInfo };
+      case 'thinking':
+      case 'chunk':
+        return {
+          type: raw.type,
+          payload: {
+            text: typeof payload.text === 'string' ? payload.text : '',
+          },
+        };
+      case 'done':
+        return {
+          type: 'done',
+          payload: {
+            finishReason: this.normalizeFinishReason(payload.finishReason),
+            ...(isRecord(payload.appliedOptions)
+              ? {
+                  appliedOptions:
+                    payload.appliedOptions as unknown as LlmInferOptions,
+                }
+              : {}),
+          },
+        };
+      case 'error':
+        return {
+          type: 'error',
+          error: {
+            code: raw.error?.code ?? 'upstream_unavailable',
+            message: raw.error?.message ?? 'LLM Host stream error',
+            retryable: raw.error?.retryable !== false,
+          },
+        };
+      default:
+        return null;
+    }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

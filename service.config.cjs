@@ -22,7 +22,7 @@ const env = {
   port: 3200,
 
   // API version surfaced in `meta.apiVersion` of every response.
-  apiVersion: 'v2',
+  apiVersion: 'v4',
 
   // CORS origins allowed for browser clients (e.g. the swirlock-chatbot-ui
   // dev server on http://localhost:4200). Empty array disables CORS entirely
