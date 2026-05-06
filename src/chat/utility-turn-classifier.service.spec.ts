@@ -43,8 +43,7 @@ describe('UtilityTurnClassifierService', () => {
       .mockResolvedValue({
         finishReason: 'stop',
         text: JSON.stringify({
-          route: 'standard_answer',
-          standardAnswerKey: 'status_check',
+          route: 'final_answer',
           turnCategory: 'social_status',
           userLanguage: 'en',
           resolvedQueryText: 'how are you today?',
@@ -84,10 +83,11 @@ describe('UtilityTurnClassifierService', () => {
         },
       }),
     );
-    expect(decision.route).toBe('standard_answer');
-    expect(decision.standardAnswerKey).toBe('status_check');
+    expect(decision.route).toBe('final_answer');
     expect(decision.shouldRetrieve).toBe(false);
     expect(decision.shouldThink).toBe(false);
+    expect(decision.includeMemoryInPrompt).toBe(false);
+    expect(decision.includeRecentConversationInPrompt).toBe(false);
   });
 
   it('falls back without retrieval or thinking when utility JSON is invalid', async () => {
@@ -116,56 +116,13 @@ describe('UtilityTurnClassifierService', () => {
     expect(decision.confidence).toBe('low');
   });
 
-  it('does not allow clarify as a direct standardized answer', async () => {
+  it('routes assistant identity questions to the final LLM', async () => {
     const infer: jest.MockedFunction<LlmHostService['infer']> = jest
       .fn()
       .mockResolvedValue({
         finishReason: 'stop',
         text: JSON.stringify({
-          route: 'standard_answer',
-          standardAnswerKey: 'clarify',
-          turnCategory: 'content_request',
-          userLanguage: 'en',
-          resolvedQueryText:
-            'define some Language Model Tools API as an example in package.json',
-          intent: 'request for code example',
-          freshness: 'medium',
-          allowedModes: [],
-          hints: [],
-          includeMemoryInPrompt: false,
-          includeRecentConversationInPrompt: false,
-          confidence: 'high',
-          reason: 'Underspecified example request.',
-        }),
-      });
-    const service = new UtilityTurnClassifierService(CONFIG, {
-      infer,
-    } as unknown as LlmHostService);
-
-    const decision = await service.classify({
-      correlationId: 'turn-3',
-      userText:
-        'define some Language Model Tools API as an example in the package.json. Do not search, do it from your own knowledge.',
-      occurredAt: '2026-05-06T08:00:00.000Z',
-      history: [],
-      defaultFreshness: 'medium',
-      defaultAllowedModes: ['local_rag', 'live_web'],
-    });
-
-    expect(decision.route).toBe('final_answer');
-    expect(decision.standardAnswerKey).toBeUndefined();
-    expect(decision.shouldRetrieve).toBe(false);
-    expect(decision.shouldThink).toBe(false);
-  });
-
-  it('does not allow assistant identity questions to become canned greetings', async () => {
-    const infer: jest.MockedFunction<LlmHostService['infer']> = jest
-      .fn()
-      .mockResolvedValue({
-        finishReason: 'stop',
-        text: JSON.stringify({
-          route: 'standard_answer',
-          standardAnswerKey: 'greeting',
+          route: 'final_answer',
           turnCategory: 'assistant_identity',
           userLanguage: 'ro',
           resolvedQueryText: 'cum te cheama',
@@ -177,7 +134,7 @@ describe('UtilityTurnClassifierService', () => {
           includeRecentConversationInPrompt: true,
           confidence: 'high',
           reason:
-            'Misclassified identity question; normalization should prevent direct greeting.',
+            'Identity question should be answered by the final model in Romanian.',
         }),
       });
     const service = new UtilityTurnClassifierService(CONFIG, {
@@ -194,19 +151,17 @@ describe('UtilityTurnClassifierService', () => {
     });
 
     expect(decision.route).toBe('final_answer');
-    expect(decision.standardAnswerKey).toBeUndefined();
     expect(decision.shouldRetrieve).toBe(false);
     expect(decision.shouldThink).toBe(false);
   });
 
-  it('does not use English canned answers for non-English social turns', async () => {
+  it('routes non-English social turns to the final LLM without retrieval or thinking', async () => {
     const infer: jest.MockedFunction<LlmHostService['infer']> = jest
       .fn()
       .mockResolvedValue({
         finishReason: 'stop',
         text: JSON.stringify({
-          route: 'standard_answer',
-          standardAnswerKey: 'greeting',
+          route: 'final_answer',
           turnCategory: 'pure_greeting',
           userLanguage: 'ro',
           resolvedQueryText: 'salut',
@@ -235,8 +190,9 @@ describe('UtilityTurnClassifierService', () => {
     });
 
     expect(decision.route).toBe('final_answer');
-    expect(decision.standardAnswerKey).toBeUndefined();
     expect(decision.shouldRetrieve).toBe(false);
     expect(decision.shouldThink).toBe(false);
+    expect(decision.includeMemoryInPrompt).toBe(false);
+    expect(decision.includeRecentConversationInPrompt).toBe(false);
   });
 });

@@ -20,7 +20,6 @@ import type {
 import { CreateSessionDto } from './dto/create-session.dto';
 import type { InputPartDto, SubmitTurnDto } from './dto/submit-turn.dto';
 import { PromptBuilderService } from './prompt-builder.service';
-import type { StandardAnswerKey } from './turn-classification';
 import type { ContextMemoryFragment, TurnPlan } from './turn-planner.service';
 import { TurnPlannerService } from './turn-planner.service';
 
@@ -60,7 +59,6 @@ export interface PreparedTurn {
   memoryFragments: ContextMemoryFragment[];
   ragContext: RagContext;
   llmParts: LlmInputPart[];
-  directAssistantText?: string;
 }
 
 export interface PersistedTurn {
@@ -225,30 +223,24 @@ export class ChatService {
         })
       : this.emptyRagContext();
 
-    const directAssistantText = this.shouldUseDirectAnswer(dto, turnPlan)
-      ? this.standardAnswerFor(turnPlan.standardAnswerKey)
-      : undefined;
-
-    const llmParts: LlmInputPart[] = directAssistantText
-      ? []
-      : [
-          {
-            type: 'text',
-            text: this.promptBuilder.build({
-              history,
-              userText,
-              occurredAt: dto.message.occurredAt,
-              turnPlan,
-              ragContext,
-            }),
-          },
-          ...imageParts.map((p) => ({
-            type: 'image' as const,
-            ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
-            ...(p.imageBase64 ? { imageBase64: p.imageBase64 } : {}),
-            ...(p.mimeType ? { mimeType: p.mimeType } : {}),
-          })),
-        ];
+    const llmParts: LlmInputPart[] = [
+      {
+        type: 'text',
+        text: this.promptBuilder.build({
+          history,
+          userText,
+          occurredAt: dto.message.occurredAt,
+          turnPlan,
+          ragContext,
+        }),
+      },
+      ...imageParts.map((p) => ({
+        type: 'image' as const,
+        ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
+        ...(p.imageBase64 ? { imageBase64: p.imageBase64 } : {}),
+        ...(p.mimeType ? { mimeType: p.mimeType } : {}),
+      })),
+    ];
 
     return {
       userText,
@@ -257,7 +249,6 @@ export class ChatService {
       memoryFragments: turnPlan.memoryFragments,
       ragContext,
       llmParts,
-      ...(directAssistantText ? { directAssistantText } : {}),
     };
   }
 
@@ -412,33 +403,5 @@ export class ChatService {
       retrievalMode: 'none',
       evidence: [],
     };
-  }
-
-  private shouldUseDirectAnswer(
-    dto: SubmitTurnDto,
-    turnPlan: TurnPlan,
-  ): turnPlan is TurnPlan & { standardAnswerKey: StandardAnswerKey } {
-    return (
-      dto.options?.forceThinking !== true &&
-      turnPlan.standardAnswerKey !== undefined &&
-      turnPlan.standardAnswerKey !== 'clarify'
-    );
-  }
-
-  private standardAnswerFor(key: StandardAnswerKey): string {
-    switch (key) {
-      case 'greeting':
-        return 'Hello! How can I help you today?';
-      case 'status_check':
-        return "I'm functioning normally and ready to help. How can I help?";
-      case 'acknowledgement':
-        return 'Understood.';
-      case 'thanks':
-        return "You're welcome.";
-      case 'goodbye':
-        return 'Goodbye.';
-      case 'clarify':
-        return 'What would you like me to focus on?';
-    }
   }
 }

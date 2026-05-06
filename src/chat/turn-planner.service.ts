@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import type { RagAllowedMode, RagFreshness, RagHint } from '../rag/rag.service';
-import type { StandardAnswerKey, TurnRoute } from './turn-classification';
+import type { TurnRoute } from './turn-classification';
 import { UtilityTurnClassifierService } from './utility-turn-classifier.service';
 
 export interface ConversationMessage {
@@ -23,7 +23,6 @@ export interface ContextMemoryFragment {
 
 export interface TurnPlan {
   route: TurnRoute;
-  standardAnswerKey?: StandardAnswerKey;
   shouldRetrieve: boolean;
   shouldThink: boolean;
   includeMemoryInPrompt: boolean;
@@ -65,9 +64,6 @@ export class TurnPlannerService {
 
     return {
       route: decision.route,
-      ...(decision.standardAnswerKey
-        ? { standardAnswerKey: decision.standardAnswerKey }
-        : {}),
       shouldRetrieve: decision.shouldRetrieve,
       shouldThink: decision.shouldThink,
       includeMemoryInPrompt: decision.includeMemoryInPrompt,

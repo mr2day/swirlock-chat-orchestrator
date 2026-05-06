@@ -59,7 +59,6 @@ type ChatStreamEvent =
           memoryFragmentCount: number;
           retrievalMode: string;
           turnRoute: string;
-          standardAnswerKey?: string;
           shouldRetrieve: boolean;
           shouldThink: boolean;
           intent: string;
@@ -221,48 +220,42 @@ export class ChatStreamHandler {
       prepared.turnPlan.shouldThink,
     );
 
-    if (prepared.directAssistantText) {
-      assistantText = prepared.directAssistantText;
-      send({ type: 'started', meta: meta() });
-      send({ type: 'chunk', meta: meta(), data: { text: assistantText } });
-    } else {
-      try {
-        const result = await this.llm.streamInfer({
-          correlationId,
-          parts: prepared.llmParts,
-          options: { thinking: wantThinking },
-          abortSignal: abort.signal,
-          onEvent: (evt) => {
-            switch (evt.type) {
-              case 'queued':
-                send({ type: 'queued', meta: meta(), data: evt.data });
-                break;
-              case 'started':
-                send({ type: 'started', meta: meta() });
-                break;
-              case 'thinking':
-                send({ type: 'thinking', meta: meta(), data: evt.data });
-                break;
-              case 'chunk':
-                send({ type: 'chunk', meta: meta(), data: evt.data });
-                break;
-              default:
-                break;
-            }
-          },
-        });
-        assistantText = result.text;
-        finishReason = result.finishReason;
-      } catch (err) {
-        const status =
-          err instanceof ServiceUnavailableException
-            ? 503
-            : err instanceof HttpException
-              ? err.getStatus()
-              : 500;
-        failTurn(status, (err as Error).message);
-        return;
-      }
+    try {
+      const result = await this.llm.streamInfer({
+        correlationId,
+        parts: prepared.llmParts,
+        options: { thinking: wantThinking },
+        abortSignal: abort.signal,
+        onEvent: (evt) => {
+          switch (evt.type) {
+            case 'queued':
+              send({ type: 'queued', meta: meta(), data: evt.data });
+              break;
+            case 'started':
+              send({ type: 'started', meta: meta() });
+              break;
+            case 'thinking':
+              send({ type: 'thinking', meta: meta(), data: evt.data });
+              break;
+            case 'chunk':
+              send({ type: 'chunk', meta: meta(), data: evt.data });
+              break;
+            default:
+              break;
+          }
+        },
+      });
+      assistantText = result.text;
+      finishReason = result.finishReason;
+    } catch (err) {
+      const status =
+        err instanceof ServiceUnavailableException
+          ? 503
+          : err instanceof HttpException
+            ? err.getStatus()
+            : 500;
+      failTurn(status, (err as Error).message);
+      return;
     }
 
     if (assistantText.length === 0) {
@@ -310,9 +303,6 @@ export class ChatStreamHandler {
                 memoryFragmentCount: prepared.memoryFragments.length,
                 retrievalMode: prepared.ragContext.retrievalMode,
                 turnRoute: prepared.turnPlan.route,
-                ...(prepared.turnPlan.standardAnswerKey
-                  ? { standardAnswerKey: prepared.turnPlan.standardAnswerKey }
-                  : {}),
                 shouldRetrieve: prepared.turnPlan.shouldRetrieve,
                 shouldThink: prepared.turnPlan.shouldThink,
                 intent: prepared.turnPlan.intent,

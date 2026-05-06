@@ -74,16 +74,6 @@ function makeDto(text: string): SubmitTurnDto {
   };
 }
 
-function makeDtoWithOptions(
-  text: string,
-  options: SubmitTurnDto['options'],
-): SubmitTurnDto {
-  return {
-    ...makeDto(text),
-    options,
-  };
-}
-
 function makeDecision(
   overrides: Partial<UtilityTurnDecision> = {},
 ): UtilityTurnDecision {
@@ -160,7 +150,7 @@ function makeService(
 }
 
 describe('ChatService turn planning', () => {
-  it('uses a utility standard-answer decision for a status check', async () => {
+  it('builds a final LLM prompt for a social status check without retrieval or memory', async () => {
     const { service, retrieve, classifier } = makeService(
       [
         {
@@ -175,12 +165,11 @@ describe('ChatService turn planning', () => {
         },
       ],
       makeDecision({
-        route: 'standard_answer',
-        standardAnswerKey: 'status_check',
+        route: 'final_answer',
         includeMemoryInPrompt: false,
         includeRecentConversationInPrompt: false,
         resolvedQueryText: 'how are you today?',
-        reason: 'Social status check; answer from standardized table.',
+        reason: 'Social status check; final model answers without context.',
       }),
     );
 
@@ -196,69 +185,12 @@ describe('ChatService turn planning', () => {
     expect(prepared.ragContext.retrievalMode).toBe('none');
     expect(prepared.turnPlan.shouldRetrieve).toBe(false);
     expect(prepared.turnPlan.shouldThink).toBe(false);
-    expect(prepared.llmParts).toEqual([]);
-    expect(prepared.directAssistantText).toBe(
-      "I'm functioning normally and ready to help. How can I help?",
-    );
-  });
-
-  it('does not bypass the final LLM when forceThinking is enabled', async () => {
-    const { service, retrieve } = makeService(
-      [],
-      makeDecision({
-        route: 'standard_answer',
-        standardAnswerKey: 'status_check',
-        includeMemoryInPrompt: false,
-        includeRecentConversationInPrompt: false,
-        resolvedQueryText: 'how are you today?',
-        reason: 'Social status check; answer from standardized table.',
-      }),
-    );
-
-    const prepared = await service.prepareTurn({
-      sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
-      dto: makeDtoWithOptions('how are you today?', {
-        includeDiagnostics: true,
-        forceThinking: true,
-      }),
-      correlationId: 'turn-force-thinking',
-      authUserId: 'dev-user',
-    });
-
-    expect(retrieve).not.toHaveBeenCalled();
-    expect(prepared.directAssistantText).toBeUndefined();
     expect(prepared.llmParts[0]?.type).toBe('text');
-  });
-
-  it('does not use the generic direct clarification answer', async () => {
-    const { service, retrieve } = makeService(
-      [],
-      makeDecision({
-        route: 'standard_answer',
-        standardAnswerKey: 'clarify',
-        shouldRetrieve: false,
-        shouldThink: false,
-        includeMemoryInPrompt: false,
-        includeRecentConversationInPrompt: false,
-        resolvedQueryText:
-          'define some Language Model Tools API as an example in the package.json',
-        intent: 'request for code example',
-        reason: 'Classifier asked for clarification.',
-      }),
-    );
-
-    const prepared = await service.prepareTurn({
-      sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
-      dto: makeDto(
-        'define some Language Model Tools API as an example in the package.json. Do not search, do it from your own knowledge.',
-      ),
-      correlationId: 'turn-clarify',
-      authUserId: 'dev-user',
-    });
-
-    expect(retrieve).not.toHaveBeenCalled();
-    expect(prepared.directAssistantText).toBeUndefined();
-    expect(prepared.llmParts[0]?.type).toBe('text');
+    const prompt =
+      prepared.llmParts[0]?.type === 'text' ? prepared.llmParts[0].text : '';
+    expect(prompt).toContain('Current user message:\nhow are you today?');
+    expect(prompt).not.toContain('Conversation memory:');
+    expect(prompt).not.toContain('Recent conversation:');
   });
 
   it('resolves elliptical follow-up questions before calling RAG', async () => {

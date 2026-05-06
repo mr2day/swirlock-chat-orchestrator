@@ -65,23 +65,6 @@ const SIMPLE_PREPARED_TURN: PreparedTurn = {
   llmParts: [{ type: 'text', text: 'Current user message:\nhello' }],
 };
 
-const DIRECT_PREPARED_TURN: PreparedTurn = {
-  ...SIMPLE_PREPARED_TURN,
-  userText: 'how are you today?',
-  turnPlan: {
-    ...SIMPLE_PREPARED_TURN.turnPlan,
-    route: 'standard_answer',
-    standardAnswerKey: 'status_check',
-    includeMemoryInPrompt: false,
-    includeRecentConversationInPrompt: false,
-    resolvedQueryText: 'how are you today?',
-    planReason: 'Social status check; answer from standardized table.',
-  },
-  llmParts: [],
-  directAssistantText:
-    "I'm functioning normally and ready to help. How can I help?",
-};
-
 class FakeWebSocket extends EventEmitter {
   readyState = WebSocket.OPEN;
   readonly sent: string[] = [];
@@ -133,71 +116,6 @@ async function waitForSentEvent(
 }
 
 describe('ChatStreamHandler thinking routing', () => {
-  it('streams and persists direct standardized answers without final LLM inference', async () => {
-    const chat = {
-      assertSessionOwnership: jest.fn(),
-      prepareTurn: jest.fn().mockResolvedValue(DIRECT_PREPARED_TURN),
-      persistTurn: jest.fn().mockReturnValue({
-        turnId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
-        userMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
-        assistantMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567802',
-        createdAt: '2026-05-06T08:51:40.000Z',
-      }),
-    } as unknown as ChatService;
-    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> =
-      jest.fn();
-    const handler = new ChatStreamHandler(CONFIG, chat, {
-      streamInfer,
-    } as unknown as LlmHostService);
-    const ws = new FakeWebSocket();
-
-    const run = handler.handle(ws as unknown as WebSocket, {
-      sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
-      authUserId: 'dev-user',
-      correlationId: 'turn-1',
-    });
-
-    setImmediate(() => {
-      ws.emit('message', submitTurnMessage({ includeDiagnostics: true }));
-    });
-
-    await waitForSentEvent(ws, 'done');
-    ws.close();
-    await run;
-
-    expect(streamInfer).not.toHaveBeenCalled();
-    expect(chat.persistTurn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        assistantText:
-          "I'm functioning normally and ready to help. How can I help?",
-      }),
-    );
-    expect(ws.sent.some((raw) => raw.includes('functioning normally'))).toBe(
-      true,
-    );
-    const done = ws.sent
-      .map((raw) => JSON.parse(raw) as { type: string; data?: unknown })
-      .find((event) => event.type === 'done') as
-      | {
-          data: {
-            diagnostics?: {
-              turnRoute?: string;
-              standardAnswerKey?: string;
-              shouldRetrieve?: boolean;
-              shouldThink?: boolean;
-            };
-          };
-        }
-      | undefined;
-
-    expect(done?.data.diagnostics).toMatchObject({
-      turnRoute: 'standard_answer',
-      standardAnswerKey: 'status_check',
-      shouldRetrieve: false,
-      shouldThink: false,
-    });
-  });
-
   it('does not pass thinking to the model for simple turns even when legacy clients send thinking=true', async () => {
     const assertSessionOwnership = jest.fn();
     const prepareTurn: jest.MockedFunction<ChatService['prepareTurn']> = jest
@@ -288,8 +206,8 @@ describe('ChatStreamHandler thinking routing', () => {
       assertSessionOwnership: jest.fn(),
       prepareTurn: jest
         .fn()
-        .mockResolvedValueOnce(DIRECT_PREPARED_TURN)
-        .mockResolvedValueOnce(DIRECT_PREPARED_TURN),
+        .mockResolvedValueOnce(SIMPLE_PREPARED_TURN)
+        .mockResolvedValueOnce(SIMPLE_PREPARED_TURN),
       persistTurn: jest
         .fn()
         .mockReturnValueOnce({
@@ -305,8 +223,12 @@ describe('ChatStreamHandler thinking routing', () => {
           createdAt: '2026-05-06T08:52:40.000Z',
         }),
     } as unknown as ChatService;
-    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> =
-      jest.fn();
+    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
+      .fn()
+      .mockResolvedValue({
+        finishReason: 'stop',
+        text: 'Hello! How can I help you today?',
+      });
     const handler = new ChatStreamHandler(CONFIG, chat, {
       streamInfer,
     } as unknown as LlmHostService);
@@ -331,6 +253,7 @@ describe('ChatStreamHandler thinking routing', () => {
 
     expect(chat.prepareTurn).toHaveBeenCalledTimes(2);
     expect(chat.persistTurn).toHaveBeenCalledTimes(2);
+    expect(streamInfer).toHaveBeenCalledTimes(2);
     expect(ws.sent.length).toBeGreaterThan(sentAfterFirstTurn);
   });
 });
