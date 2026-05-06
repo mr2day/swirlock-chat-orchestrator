@@ -13,6 +13,7 @@ Built now:
 - conversation sessions stored directly in SQLite
 - RAG Engine integration over WebSocket, forwarding retrieval progress
   through the chat stream
+- Utility LLM turn classification before retrieval or final-answer inference
 - client image input via `imageUrl` or pasted-image `imageBase64`
 - final-answer generation through Model Host WebSocket `/v2/infer/stream`
 - ecosystem turn submission is WebSocket-only
@@ -52,6 +53,8 @@ Defaults:
 - HTTP listener: `127.0.0.1:3200`
 - RAG Engine: `http://127.0.0.1:3001`
 - Model Host: `http://127.0.0.1:3213`
+- Utility Model Host: `http://127.0.0.1:3213` with caller service
+  `chat-orchestrator:turn-classifier`
 - SQLite file: `./data/chat-orchestrator.sqlite`
 - Dev user: `dev-user`
 - Dev bearer token: `dev-token-change-me`
@@ -133,6 +136,10 @@ ws.onmessage = (e) => {
 
 The `done` event carries the persisted `turnId`,
 `assistantMessage.messageId`, `createdAt`, and citations.
+When `options.includeDiagnostics` is true, it also includes the selected
+turn route, retrieval/thinking booleans, intent, freshness, and planner
+reason. Utility classifier prompts and raw outputs are never persisted as
+conversation messages.
 
 ## Project Layout
 

@@ -141,7 +141,7 @@ describe('ChatStreamHandler thinking routing', () => {
     });
 
     setImmediate(() => {
-      ws.emit('message', submitTurnMessage({}));
+      ws.emit('message', submitTurnMessage({ includeDiagnostics: true }));
     });
 
     await run;
@@ -156,6 +156,27 @@ describe('ChatStreamHandler thinking routing', () => {
     expect(ws.sent.some((raw) => raw.includes('functioning normally'))).toBe(
       true,
     );
+    const done = ws.sent
+      .map((raw) => JSON.parse(raw) as { type: string; data?: unknown })
+      .find((event) => event.type === 'done') as
+      | {
+          data: {
+            diagnostics?: {
+              turnRoute?: string;
+              standardAnswerKey?: string;
+              shouldRetrieve?: boolean;
+              shouldThink?: boolean;
+            };
+          };
+        }
+      | undefined;
+
+    expect(done?.data.diagnostics).toMatchObject({
+      turnRoute: 'standard_answer',
+      standardAnswerKey: 'status_check',
+      shouldRetrieve: false,
+      shouldThink: false,
+    });
   });
 
   it('does not pass thinking to the model for simple turns even when legacy clients send thinking=true', async () => {

@@ -53,6 +53,13 @@ type ChatStreamEvent =
           retrievalUsed: boolean;
           memoryFragmentCount: number;
           retrievalMode: string;
+          turnRoute: string;
+          standardAnswerKey?: string;
+          shouldRetrieve: boolean;
+          shouldThink: boolean;
+          intent: string;
+          freshness: string;
+          planReason: string;
         };
       };
     }
@@ -271,6 +278,15 @@ export class ChatStreamHandler {
                 retrievalUsed: prepared.ragContext.retrievalUsed,
                 memoryFragmentCount: prepared.memoryFragments.length,
                 retrievalMode: prepared.ragContext.retrievalMode,
+                turnRoute: prepared.turnPlan.route,
+                ...(prepared.turnPlan.standardAnswerKey
+                  ? { standardAnswerKey: prepared.turnPlan.standardAnswerKey }
+                  : {}),
+                shouldRetrieve: prepared.turnPlan.shouldRetrieve,
+                shouldThink: prepared.turnPlan.shouldThink,
+                intent: prepared.turnPlan.intent,
+                freshness: prepared.turnPlan.freshness,
+                planReason: prepared.turnPlan.planReason,
               },
             }
           : {}),
