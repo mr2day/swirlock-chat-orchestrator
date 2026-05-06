@@ -19,6 +19,9 @@ import type {
 } from '../rag/rag.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import type { InputPartDto, SubmitTurnDto } from './dto/submit-turn.dto';
+import { PromptBuilderService } from './prompt-builder.service';
+import type { ContextMemoryFragment, TurnPlan } from './turn-planner.service';
+import { TurnPlannerService } from './turn-planner.service';
 
 interface SessionRow {
   id: string;
@@ -52,6 +55,8 @@ interface ChatImagePart {
 export interface PreparedTurn {
   userText: string;
   imageParts: ChatImagePart[];
+  turnPlan: TurnPlan;
+  memoryFragments: ContextMemoryFragment[];
   ragContext: RagContext;
   llmParts: LlmInputPart[];
 }
@@ -69,6 +74,8 @@ export class ChatService {
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly db: DatabaseService,
     private readonly rag: RagService,
+    private readonly turnPlanner: TurnPlannerService,
+    private readonly promptBuilder: PromptBuilderService,
   ) {}
 
   createSession(args: {
@@ -191,17 +198,40 @@ export class ChatService {
       )
       .all(sessionId) as MessageRow[];
 
-    const ragContext = await this.rag.retrieve({
-      correlationId,
-      sessionId,
+    const turnPlan = this.turnPlanner.plan({
       userText,
-      parts: this.buildRagParts(dto.message.parts),
-      onStreamEvent: args.onRagStreamEvent,
-      abortSignal: args.abortSignal,
+      occurredAt: dto.message.occurredAt,
+      history,
+      defaultFreshness: this.cfg.rag.freshness,
+      defaultAllowedModes: [...this.cfg.rag.allowedModes],
     });
+    const ragContext = turnPlan.shouldRetrieve
+      ? await this.rag.retrieve({
+          correlationId,
+          sessionId,
+          userText,
+          parts: this.buildRagParts(dto.message.parts),
+          resolvedQueryText: turnPlan.resolvedQueryText,
+          intent: turnPlan.intent,
+          hints: turnPlan.hints,
+          freshness: turnPlan.freshness,
+          allowedModes: turnPlan.allowedModes,
+          onStreamEvent: args.onRagStreamEvent,
+          abortSignal: args.abortSignal,
+        })
+      : this.emptyRagContext();
 
     const llmParts: LlmInputPart[] = [
-      { type: 'text', text: this.buildPrompt(history, userText, ragContext) },
+      {
+        type: 'text',
+        text: this.promptBuilder.build({
+          history,
+          userText,
+          occurredAt: dto.message.occurredAt,
+          turnPlan,
+          ragContext,
+        }),
+      },
       ...imageParts.map((p) => ({
         type: 'image' as const,
         ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
@@ -210,7 +240,14 @@ export class ChatService {
       })),
     ];
 
-    return { userText, imageParts, ragContext, llmParts };
+    return {
+      userText,
+      imageParts,
+      turnPlan,
+      memoryFragments: turnPlan.memoryFragments,
+      ragContext,
+      llmParts,
+    };
   }
 
   /**
@@ -358,28 +395,11 @@ export class ChatService {
     });
   }
 
-  private buildPrompt(
-    history: MessageRow[],
-    userText: string,
-    rag: RagContext,
-  ): string {
-    const lines: string[] = [
-      'You are the Swirlock assistant. Answer the user concisely and helpfully.',
-    ];
-    if (rag.evidence.length > 0) {
-      lines.push('', 'Retrieved evidence:');
-      for (const e of rag.evidence) {
-        lines.push(
-          `- ${e.sourceTitle}${e.sourceUrl ? ` (${e.sourceUrl})` : ''}${e.snippet ? `: ${e.snippet}` : ''}`,
-        );
-      }
-    }
-    lines.push('');
-    for (const m of history) {
-      lines.push(`${m.role.toUpperCase()}: ${m.content}`);
-    }
-    lines.push(`USER: ${userText}`);
-    lines.push('ASSISTANT:');
-    return lines.join('\n');
+  private emptyRagContext(): RagContext {
+    return {
+      retrievalUsed: false,
+      retrievalMode: 'none',
+      evidence: [],
+    };
   }
 }

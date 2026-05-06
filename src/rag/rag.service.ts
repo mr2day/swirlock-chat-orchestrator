@@ -9,6 +9,19 @@ export type RetrievalMode =
   | 'live_web'
   | 'local_and_live';
 
+export type RagFreshness = 'low' | 'medium' | 'high' | 'realtime';
+export type RagAllowedMode = 'local_rag' | 'live_web';
+
+export interface RagHint {
+  kind:
+    | 'entity'
+    | 'time_reference'
+    | 'preference'
+    | 'disambiguation'
+    | 'constraint';
+  text: string;
+}
+
 export type RagInputPart =
   | { type: 'text'; text: string }
   | { type: 'image'; imageUrl?: string; imageId?: string; mimeType?: string };
@@ -39,6 +52,11 @@ export interface RagInquiry {
   sessionId: string;
   userText: string;
   parts: RagInputPart[];
+  resolvedQueryText?: string;
+  intent?: string;
+  hints?: RagHint[];
+  freshness?: RagFreshness;
+  allowedModes?: RagAllowedMode[];
   onStreamEvent?: (event: RetrievalStreamEvent) => void;
   abortSignal?: AbortSignal;
 }
@@ -208,9 +226,13 @@ export class RagService {
       },
       query: {
         parts: inquiry.parts,
-        resolvedQueryText: inquiry.userText,
-        freshness: this.cfg.rag.freshness,
-        allowedModes: this.cfg.rag.allowedModes,
+        resolvedQueryText: inquiry.resolvedQueryText ?? inquiry.userText,
+        ...(inquiry.intent ? { intent: inquiry.intent } : {}),
+        ...(inquiry.hints && inquiry.hints.length > 0
+          ? { hints: inquiry.hints }
+          : {}),
+        freshness: inquiry.freshness ?? this.cfg.rag.freshness,
+        allowedModes: inquiry.allowedModes ?? this.cfg.rag.allowedModes,
         maxEvidenceChunks: this.cfg.rag.maxEvidenceChunks,
         synthesisMode: this.cfg.rag.synthesisMode,
       },

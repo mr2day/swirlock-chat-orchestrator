@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
+import type { Response } from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 
@@ -20,8 +21,9 @@ describe('Chat Orchestrator (e2e)', () => {
     return request(app.getHttpServer())
       .get('/v2/health')
       .expect(200)
-      .expect((response) => {
-        expect(response.body.data.status).toBe('ok');
+      .expect((response: Response) => {
+        const body = response.body as { data?: { status?: unknown } };
+        expect(body.data?.status).toBe('ok');
       });
   });
 

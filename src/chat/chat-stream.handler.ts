@@ -16,6 +16,7 @@ import { LlmHostService } from '../llm-host/llm-host.service';
 import type { QueueWaitInfo } from '../llm-host/llm-host.service';
 import type { RetrievalStreamEvent } from '../rag/rag.service';
 import { ChatService } from './chat.service';
+import type { PersistedTurn, PreparedTurn } from './chat.service';
 import { SubmitTurnDto } from './dto/submit-turn.dto';
 
 interface ConnectionContext {
@@ -109,7 +110,8 @@ export class ChatStreamHandler {
         ws.send(JSON.stringify(event));
       }
     };
-    const meta = (): ApiMeta => buildMeta(ctx.correlationId, this.cfg.apiVersion);
+    const meta = (): ApiMeta =>
+      buildMeta(ctx.correlationId, this.cfg.apiVersion);
     const closeWithError = (status: number, message: string): void => {
       send({
         type: 'error',
@@ -152,7 +154,7 @@ export class ChatStreamHandler {
     const abort = new AbortController();
     ws.once('close', () => abort.abort());
 
-    let prepared;
+    let prepared: PreparedTurn;
     try {
       prepared = await this.chat.prepareTurn({
         sessionId: ctx.sessionId,
@@ -222,7 +224,7 @@ export class ChatStreamHandler {
       return;
     }
 
-    let persisted;
+    let persisted: PersistedTurn;
     try {
       persisted = this.chat.persistTurn({
         sessionId: ctx.sessionId,
@@ -258,7 +260,7 @@ export class ChatStreamHandler {
           ? {
               diagnostics: {
                 retrievalUsed: prepared.ragContext.retrievalUsed,
-                memoryFragmentCount: 0,
+                memoryFragmentCount: prepared.memoryFragments.length,
                 retrievalMode: prepared.ragContext.retrievalMode,
               },
             }
@@ -321,7 +323,9 @@ export class ChatStreamHandler {
       };
       const onClose = (): void => {
         cleanup();
-        reject(new Error('client closed connection before sending submit_turn'));
+        reject(
+          new Error('client closed connection before sending submit_turn'),
+        );
       };
       const cleanup = (): void => {
         clearTimeout(timer);

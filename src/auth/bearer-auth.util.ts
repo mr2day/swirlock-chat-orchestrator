@@ -30,7 +30,10 @@ export function extractBearerToken(req: IncomingMessage): string | undefined {
 
   const proto = req.headers['sec-websocket-protocol'];
   if (typeof proto === 'string') {
-    const parts = proto.split(',').map((p) => p.trim()).filter((p) => p.length > 0);
+    const parts = proto
+      .split(',')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
     const idx = parts.indexOf('bearer');
     if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
   }
