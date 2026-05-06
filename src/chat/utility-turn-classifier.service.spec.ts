@@ -38,7 +38,7 @@ const CONFIG: ServiceConfig = {
 
 describe('UtilityTurnClassifierService', () => {
   it('calls the utility LLM with JSON output and thinking disabled', async () => {
-    const infer: jest.MockedFunction<LlmHostService['infer']> = jest
+    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
       .fn()
       .mockResolvedValue({
         finishReason: 'stop',
@@ -58,7 +58,7 @@ describe('UtilityTurnClassifierService', () => {
         }),
       });
     const service = new UtilityTurnClassifierService(CONFIG, {
-      infer,
+      streamInfer,
     } as unknown as LlmHostService);
 
     const decision = await service.classify({
@@ -70,7 +70,7 @@ describe('UtilityTurnClassifierService', () => {
       defaultAllowedModes: ['local_rag', 'live_web'],
     });
 
-    expect(infer).toHaveBeenCalledWith(
+    expect(streamInfer).toHaveBeenCalledWith(
       expect.objectContaining({
         baseUrl: 'http://127.0.0.1:3213',
         callerService: 'chat-orchestrator:turn-classifier',
@@ -91,14 +91,14 @@ describe('UtilityTurnClassifierService', () => {
   });
 
   it('falls back without retrieval or thinking when utility JSON is invalid', async () => {
-    const infer: jest.MockedFunction<LlmHostService['infer']> = jest
+    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
       .fn()
       .mockResolvedValue({
         finishReason: 'stop',
         text: 'not json',
       });
     const service = new UtilityTurnClassifierService(CONFIG, {
-      infer,
+      streamInfer,
     } as unknown as LlmHostService);
 
     const decision = await service.classify({
@@ -117,7 +117,7 @@ describe('UtilityTurnClassifierService', () => {
   });
 
   it('routes assistant identity questions to the final LLM', async () => {
-    const infer: jest.MockedFunction<LlmHostService['infer']> = jest
+    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
       .fn()
       .mockResolvedValue({
         finishReason: 'stop',
@@ -138,7 +138,7 @@ describe('UtilityTurnClassifierService', () => {
         }),
       });
     const service = new UtilityTurnClassifierService(CONFIG, {
-      infer,
+      streamInfer,
     } as unknown as LlmHostService);
 
     const decision = await service.classify({
@@ -156,7 +156,7 @@ describe('UtilityTurnClassifierService', () => {
   });
 
   it('routes non-English social turns to the final LLM without retrieval or thinking', async () => {
-    const infer: jest.MockedFunction<LlmHostService['infer']> = jest
+    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
       .fn()
       .mockResolvedValue({
         finishReason: 'stop',
@@ -177,7 +177,7 @@ describe('UtilityTurnClassifierService', () => {
         }),
       });
     const service = new UtilityTurnClassifierService(CONFIG, {
-      infer,
+      streamInfer,
     } as unknown as LlmHostService);
 
     const decision = await service.classify({

@@ -2,6 +2,8 @@ import {
   Inject,
   Injectable,
   Logger,
+  OnModuleDestroy,
+  OnModuleInit,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import WebSocket from 'ws';
@@ -29,12 +31,6 @@ export interface LlmInferOptions {
   responseFormat?: 'text' | 'json';
   thinking?: boolean;
   ollama?: Record<string, unknown>;
-}
-
-export interface LlmInferResult {
-  finishReason: 'stop' | 'length' | 'error';
-  text: string;
-  appliedOptions?: LlmInferOptions;
 }
 
 export interface QueueWaitInfo {
@@ -74,88 +70,41 @@ export interface LlmStreamResult {
 }
 
 @Injectable()
-export class LlmHostService {
+export class LlmHostService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(LlmHostService.name);
+  private readonly clients = new Map<string, PersistentModelHostSocket>();
 
   constructor(@Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig) {}
 
-  async infer(args: {
-    correlationId: string;
-    parts: LlmInputPart[];
-    options?: LlmInferOptions;
-    baseUrl?: string;
-    callerService?: string;
-    timeoutMs?: number;
-    priority?: number;
-    abortSignal?: AbortSignal;
-  }): Promise<LlmInferResult> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => {
-      controller.abort();
-    }, args.timeoutMs ?? this.cfg.llmHost.timeoutMs);
-
-    const onAbort = (): void => controller.abort();
-    args.abortSignal?.addEventListener('abort', onAbort, { once: true });
-
-    try {
-      const res = await fetch(
-        this.httpUrl(args.baseUrl ?? this.cfg.llmHost.baseUrl, '/v2/infer'),
-        {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-correlation-id': args.correlationId,
-          },
-          body: JSON.stringify({
-            requestContext: this.buildRequestContext(args),
-            input: { parts: args.parts },
-            ...(args.options ? { options: args.options } : {}),
-          }),
-          signal: controller.signal,
-        },
-      );
-
-      if (!res.ok) {
-        throw new ServiceUnavailableException(
-          `LLM Host infer failed with HTTP ${res.status}`,
-        );
-      }
-
-      const payload = (await res.json()) as {
-        data?: {
-          output?: { text?: unknown };
-          finishReason?: unknown;
-          appliedOptions?: LlmInferOptions;
-        };
-      };
-
-      return {
-        finishReason: this.normalizeFinishReason(payload.data?.finishReason),
-        text:
-          typeof payload.data?.output?.text === 'string'
-            ? payload.data.output.text
-            : '',
-        ...(payload.data?.appliedOptions
-          ? { appliedOptions: payload.data.appliedOptions }
-          : {}),
-      };
-    } catch (err) {
-      if (err instanceof ServiceUnavailableException) throw err;
-      throw new ServiceUnavailableException(
-        err instanceof Error ? err.message : 'LLM Host infer failed',
-      );
-    } finally {
-      clearTimeout(timeout);
-      args.abortSignal?.removeEventListener('abort', onAbort);
+  onModuleInit(): void {
+    const urls = new Set([
+      this.cfg.llmHost.baseUrl,
+      this.cfg.utilityLlmHost?.baseUrl,
+    ]);
+    for (const baseUrl of urls) {
+      if (!baseUrl) continue;
+      void this.clientFor(baseUrl)
+        .connect()
+        .catch((err: Error) => {
+          this.log.warn(
+            `Model Host persistent socket unavailable at startup (${baseUrl}): ${err.message}`,
+          );
+        });
     }
   }
 
+  onModuleDestroy(): void {
+    for (const client of this.clients.values()) {
+      client.close();
+    }
+    this.clients.clear();
+  }
+
   /**
-   * Opens the upstream Model Host WebSocket at /v2/infer/stream, sends one
-   * StreamInferMessage, and forwards every event to `onEvent` until `done`
-   * or `error`. Resolves with the assembled assistant text when the upstream
-   * cleanly emits `done`. Rejects on upstream `error`, transport failure,
-   * timeout, or premature close.
+   * Sends one inference request over the persistent upstream Model Host
+   * WebSocket at /v2/infer/stream. Callers that need live UI updates provide
+   * `onEvent`; callers such as the Utility turn classifier can omit it and just
+   * read the assembled response text.
    */
   async streamInfer(args: {
     correlationId: string;
@@ -164,106 +113,24 @@ export class LlmHostService {
     baseUrl?: string;
     callerService?: string;
     priority?: number;
-    onEvent: (event: LlmStreamEvent) => void;
+    timeoutMs?: number;
+    onEvent?: (event: LlmStreamEvent) => void;
     abortSignal?: AbortSignal;
   }): Promise<LlmStreamResult> {
-    const wsUrl =
-      (args.baseUrl ?? this.cfg.llmHost.baseUrl)
-        .replace(/^http:/i, 'ws:')
-        .replace(/^https:/i, 'wss:')
-        .replace(/\/$/, '') + '/v2/infer/stream';
-
-    const ws = new WebSocket(wsUrl, {
-      headers: { 'x-correlation-id': args.correlationId },
+    const result = await this.clientFor(
+      args.baseUrl ?? this.cfg.llmHost.baseUrl,
+    ).streamInfer({
+      correlationId: args.correlationId,
+      request: this.buildInferRequest(args),
+      timeoutMs: args.timeoutMs ?? this.cfg.llmHost.timeoutMs,
+      onEvent: args.onEvent,
+      abortSignal: args.abortSignal,
     });
 
-    let assistantText = '';
-    let finishReason: 'stop' | 'length' | 'error' = 'error';
-    let settled = false;
-
-    return new Promise<LlmStreamResult>((resolve, reject) => {
-      const settle = (fn: () => void): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        try {
-          ws.close();
-        } catch {
-          /* ignore */
-        }
-        fn();
-      };
-
-      const timer = setTimeout(() => {
-        settle(() =>
-          reject(new ServiceUnavailableException('LLM Host stream timeout')),
-        );
-      }, this.cfg.llmHost.timeoutMs);
-
-      const onAbort = (): void => {
-        settle(() => reject(new Error('aborted')));
-      };
-      args.abortSignal?.addEventListener('abort', onAbort, { once: true });
-
-      ws.on('open', () => {
-        const msg = {
-          type: 'infer',
-          correlationId: args.correlationId,
-          request: this.buildInferRequest(args),
-        };
-        ws.send(JSON.stringify(msg));
-      });
-
-      ws.on('message', (raw: WebSocket.RawData) => {
-        let evt: LlmStreamEvent;
-        try {
-          evt = JSON.parse(rawToString(raw)) as LlmStreamEvent;
-        } catch {
-          this.log.warn('LLM Host emitted non-JSON stream message');
-          return;
-        }
-
-        try {
-          args.onEvent(evt);
-        } catch (e) {
-          this.log.warn(`stream event handler threw: ${(e as Error).message}`);
-        }
-
-        if (evt.type === 'chunk' && evt.data?.text) {
-          assistantText += evt.data.text;
-        }
-        if (evt.type === 'done') {
-          finishReason = evt.data.finishReason;
-          settle(() => resolve({ finishReason, text: assistantText }));
-        }
-        if (evt.type === 'error') {
-          settle(() =>
-            reject(
-              new ServiceUnavailableException(
-                evt.error?.message ?? 'LLM Host stream error',
-              ),
-            ),
-          );
-        }
-      });
-
-      ws.on('error', (err: Error) => {
-        this.log.error(`LLM Host WS error: ${err.message}`);
-        settle(() =>
-          reject(new ServiceUnavailableException('LLM Host unreachable')),
-        );
-      });
-
-      ws.on('close', () => {
-        settle(() =>
-          reject(
-            new ServiceUnavailableException(
-              'LLM Host closed stream without done/error',
-            ),
-          ),
-        );
-      });
-    });
+    return {
+      finishReason: result.finishReason,
+      text: result.text,
+    };
   }
 
   private buildInferRequest(args: {
@@ -290,14 +157,342 @@ export class LlmHostService {
     };
   }
 
-  private httpUrl(baseUrl: string, path: string): string {
-    return `${baseUrl.replace(/\/$/, '')}${path}`;
-  }
-
   private normalizeFinishReason(value: unknown): 'stop' | 'length' | 'error' {
     if (value === 'stop' || value === 'length' || value === 'error') {
       return value;
     }
     return 'error';
+  }
+
+  private clientFor(baseUrl: string): PersistentModelHostSocket {
+    const normalized = baseUrl.replace(/\/$/, '');
+    const existing = this.clients.get(normalized);
+    if (existing) return existing;
+
+    const client = new PersistentModelHostSocket(
+      normalized,
+      this.cfg.llmHost.timeoutMs,
+      this.log,
+      (value) => this.normalizeFinishReason(value),
+    );
+    this.clients.set(normalized, client);
+    return client;
+  }
+}
+
+interface PersistentInferRequest {
+  correlationId: string;
+  request: ModelHostInferRequest;
+  timeoutMs: number;
+  onEvent?: (event: LlmStreamEvent) => void;
+  abortSignal?: AbortSignal;
+}
+
+interface ModelHostInferRequest {
+  requestContext: {
+    callerService: string;
+    priority?: number;
+    requestedAt: string;
+  };
+  input: { parts: LlmInputPart[] };
+  options?: LlmInferOptions;
+}
+
+interface PersistentInferResult {
+  finishReason: 'stop' | 'length' | 'error';
+  text: string;
+  appliedOptions?: LlmInferOptions;
+}
+
+interface PendingInferRequest {
+  text: string;
+  finishReason: 'stop' | 'length' | 'error';
+  timer: NodeJS.Timeout;
+  onEvent?: (event: LlmStreamEvent) => void;
+  resolve: (result: PersistentInferResult) => void;
+  reject: (error: Error) => void;
+  abortSignal?: AbortSignal;
+  onAbort?: () => void;
+}
+
+type CorrelatedLlmStreamEvent = LlmStreamEvent & { correlationId?: string };
+
+class PersistentModelHostSocket {
+  private ws?: WebSocket;
+  private connecting?: Promise<void>;
+  private reconnectTimer?: NodeJS.Timeout;
+  private closing = false;
+  private readonly pending = new Map<string, PendingInferRequest>();
+
+  constructor(
+    private readonly baseUrl: string,
+    private readonly defaultTimeoutMs: number,
+    private readonly log: Logger,
+    private readonly normalizeFinishReason: (
+      value: unknown,
+    ) => 'stop' | 'length' | 'error',
+  ) {}
+
+  async connect(): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN) return;
+    if (this.connecting) return this.connecting;
+
+    this.closing = false;
+    const wsUrl = this.streamUrl();
+
+    this.connecting = new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      let settled = false;
+      const settle = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        fn();
+      };
+      const timer = setTimeout(() => {
+        settle(() => {
+          try {
+            ws.close();
+          } catch {
+            /* ignore */
+          }
+          reject(new Error('Model Host persistent socket connect timeout'));
+        });
+      }, this.defaultTimeoutMs);
+
+      ws.on('open', () => {
+        this.ws = ws;
+        this.attachSocketHandlers(ws);
+        settle(resolve);
+      });
+
+      ws.on('error', (err: Error) => {
+        settle(() => reject(err));
+      });
+
+      ws.on('close', () => {
+        settle(() => reject(new Error('Model Host persistent socket closed')));
+      });
+    }).finally(() => {
+      this.connecting = undefined;
+    });
+
+    return this.connecting;
+  }
+
+  close(): void {
+    this.closing = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    this.failAll(new Error('Model Host persistent socket closed'));
+    try {
+      this.ws?.close();
+    } catch {
+      /* ignore */
+    }
+    this.ws = undefined;
+  }
+
+  async streamInfer(
+    args: PersistentInferRequest,
+  ): Promise<PersistentInferResult> {
+    await this.connect();
+
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new ServiceUnavailableException(
+        'LLM Host persistent socket unavailable',
+      );
+    }
+
+    return new Promise<PersistentInferResult>((resolve, reject) => {
+      if (this.pending.has(args.correlationId)) {
+        reject(
+          new ServiceUnavailableException(
+            `LLM Host request ${args.correlationId} is already pending`,
+          ),
+        );
+        return;
+      }
+
+      const timeoutMs = args.timeoutMs || this.defaultTimeoutMs;
+      const timer = setTimeout(() => {
+        this.rejectPending(
+          args.correlationId,
+          new ServiceUnavailableException('LLM Host stream timeout'),
+        );
+      }, timeoutMs);
+
+      const onAbort = (): void => {
+        this.sendCancel(args.correlationId);
+        this.rejectPending(args.correlationId, new Error('aborted'));
+      };
+      args.abortSignal?.addEventListener('abort', onAbort, { once: true });
+
+      this.pending.set(args.correlationId, {
+        text: '',
+        finishReason: 'error',
+        timer,
+        onEvent: args.onEvent,
+        resolve,
+        reject,
+        abortSignal: args.abortSignal,
+        onAbort,
+      });
+
+      try {
+        ws.send(
+          JSON.stringify({
+            type: 'infer',
+            correlationId: args.correlationId,
+            request: args.request,
+          }),
+        );
+      } catch (error) {
+        this.rejectPending(
+          args.correlationId,
+          error instanceof Error ? error : new Error('LLM Host send failed'),
+        );
+      }
+    });
+  }
+
+  private attachSocketHandlers(ws: WebSocket): void {
+    ws.on('message', (raw: WebSocket.RawData) => {
+      this.handleMessage(raw);
+    });
+
+    ws.on('error', (err: Error) => {
+      this.log.error(`LLM Host persistent WS error: ${err.message}`);
+    });
+
+    ws.on('close', () => {
+      if (this.ws === ws) {
+        this.ws = undefined;
+      }
+      this.failAll(new Error('LLM Host persistent socket closed'));
+      this.scheduleReconnect();
+    });
+  }
+
+  private handleMessage(raw: WebSocket.RawData): void {
+    let evt: CorrelatedLlmStreamEvent;
+    try {
+      evt = JSON.parse(rawToString(raw)) as CorrelatedLlmStreamEvent;
+    } catch {
+      this.log.warn('LLM Host emitted non-JSON stream message');
+      return;
+    }
+
+    const correlationId = evt.correlationId ?? evt.meta?.correlationId;
+    if (!correlationId) {
+      this.log.warn('LLM Host emitted stream event without correlationId');
+      return;
+    }
+
+    const pending = this.pending.get(correlationId);
+    if (!pending) return;
+
+    try {
+      pending.onEvent?.(evt);
+    } catch (error) {
+      this.log.warn(
+        `stream event handler threw: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    if (evt.type === 'chunk' && evt.data?.text) {
+      pending.text += evt.data.text;
+    }
+
+    if (evt.type === 'done') {
+      this.resolvePending(correlationId, {
+        finishReason: this.normalizeFinishReason(evt.data.finishReason),
+        text: pending.text,
+        ...(evt.data.appliedOptions
+          ? { appliedOptions: evt.data.appliedOptions }
+          : {}),
+      });
+    }
+
+    if (evt.type === 'error') {
+      this.rejectPending(
+        correlationId,
+        new ServiceUnavailableException(
+          evt.error?.message ?? 'LLM Host stream error',
+        ),
+      );
+    }
+  }
+
+  private resolvePending(
+    correlationId: string,
+    result: PersistentInferResult,
+  ): void {
+    const pending = this.pending.get(correlationId);
+    if (!pending) return;
+    this.cleanupPending(correlationId, pending);
+    pending.resolve(result);
+  }
+
+  private rejectPending(correlationId: string, error: Error): void {
+    const pending = this.pending.get(correlationId);
+    if (!pending) return;
+    this.cleanupPending(correlationId, pending);
+    pending.reject(error);
+  }
+
+  private cleanupPending(
+    correlationId: string,
+    pending: PendingInferRequest,
+  ): void {
+    this.pending.delete(correlationId);
+    clearTimeout(pending.timer);
+    if (pending.onAbort) {
+      pending.abortSignal?.removeEventListener('abort', pending.onAbort);
+    }
+  }
+
+  private failAll(error: Error): void {
+    for (const [correlationId, pending] of this.pending) {
+      this.cleanupPending(correlationId, pending);
+      pending.reject(new ServiceUnavailableException(error.message));
+    }
+  }
+
+  private sendCancel(correlationId: string): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify({ type: 'cancel', correlationId }));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closing || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      void this.connect().catch((err: Error) => {
+        this.log.warn(
+          `LLM Host persistent socket reconnect failed (${this.baseUrl}): ${err.message}`,
+        );
+        this.scheduleReconnect();
+      });
+    }, 1000);
+  }
+
+  private streamUrl(): string {
+    return (
+      this.baseUrl
+        .replace(/^http:/i, 'ws:')
+        .replace(/^https:/i, 'wss:')
+        .replace(/\/$/, '') + '/v2/infer/stream'
+    );
   }
 }

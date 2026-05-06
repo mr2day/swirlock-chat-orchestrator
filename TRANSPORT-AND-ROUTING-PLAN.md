@@ -16,6 +16,9 @@ This document is a plan only. It does not change runtime behavior by itself.
 
 - No canned answers anywhere in the orchestrator.
 - No hardcoded word matching for user intent.
+- Each service-to-service relationship keeps a persistent WebSocket open for
+  hot-path messages. This rule takes precedence over older one-request
+  transport wording.
 - The Utility LLM and embedding router may classify or route only; they must not
   generate user-visible replies.
 - The final-answer LLM is the only component that writes assistant response
@@ -35,17 +38,19 @@ Already good:
   thinking disabled, and no conversation persistence.
 - The orchestrator can already route a turn to final-answer generation without
   RAG or thinking when the classifier returns that structured decision.
+- Contracts v3 now state the persistent service WebSocket rule.
+- Model Host `/v2/infer/stream` is now defined as a persistent multiplexed
+  stream keyed by `correlationId`.
+- The local LLM Host keeps `/v2/infer/stream` open after `done`/`error` and
+  accepts multiple correlated `infer` messages.
+- The orchestrator's Model Host client now uses a persistent upstream socket for
+  Utility classification and final-answer generation.
 
 Still wrong for the target architecture:
 
-- Orchestrator to Utility LLM classification uses HTTP `POST /v2/infer`.
-- Orchestrator to final-answer Model Host opens a new WebSocket per turn at
-  `/v2/infer/stream`.
 - Orchestrator to RAG Engine opens a new WebSocket per retrieval request.
 - RAG Engine to Embedding Service uses HTTP for embeddings.
-- The v3 Model Host contract currently documents `/v2/infer/stream` as one
-  inference request per WebSocket connection, so a persistent multiplexed
-  service stream needs a contract update before it becomes the canonical path.
+- Semantic embedding routing is not implemented yet.
 
 ## Target Architecture
 
@@ -67,14 +72,11 @@ requests over those sockets, and reconnects on failure.
 
 ## Persistent Service Stream Protocol
 
-Add a multiplexed service WebSocket protocol to the contracts before making the
-orchestrator depend on it.
+The existing hot-path WebSocket endpoints are persistent service streams:
 
-Candidate path names:
-
-- Model Host: `/v2/infer/service-stream`
-- RAG Engine: `/v2/retrieval/evidence/service-stream`
-- Embedding Service: `/v2/embeddings/service-stream`
+- Model Host: `/v2/infer/stream`
+- RAG Engine: `/v2/retrieval/evidence/stream`
+- Embedding Service: `/v2/embeddings/stream`
 
 Client to server messages:
 
@@ -188,6 +190,8 @@ model and update dimensions/config consistently across services.
 
 ### Phase 1: Contract And Protocol Design
 
+Status: partially complete.
+
 Deliverables:
 
 - Update contracts v3 with persistent multiplexed service streams.
@@ -205,6 +209,8 @@ Exit criteria:
 
 ### Phase 2: Shared Service Socket Client
 
+Status: partially complete for Model Host calls inside the orchestrator.
+
 Deliverables:
 
 - Add a reusable client abstraction in the orchestrator:
@@ -216,7 +222,7 @@ Deliverables:
   - cancellation
   - backpressure / max in-flight guard
   - health state
-- Keep existing HTTP/per-request WebSocket clients as fallback during migration.
+- Remove HTTP/per-request WebSocket usage from hot service-to-service LLM calls.
 
 Exit criteria:
 
@@ -224,6 +230,8 @@ Exit criteria:
   request/stream lifecycle over it in tests.
 
 ### Phase 3: LLM Host Persistent Transport
+
+Status: implemented for the local Model Host and orchestrator Model Host client.
 
 Deliverables:
 
@@ -298,18 +306,18 @@ Exit criteria:
 
 ## Suggested Build Order
 
-1. Update contracts for persistent multiplexed service streams.
-2. Implement the shared persistent socket client in the orchestrator.
-3. Add persistent stream support to LLM Host.
-4. Move Utility and final-answer LLM calls to the persistent LLM socket.
+1. Finish RAG Engine persistent retrieval stream support.
+2. Finish Embedding Service persistent embedding stream support.
+3. Move orchestrator retrieval calls to the persistent RAG socket.
+4. Move RAG Engine embedding calls to the persistent Embedding socket.
 5. Add the semantic router using the existing embedding HTTP endpoint as a
    temporary bridge.
-6. Move Embedding Service and RAG Engine to persistent service streams.
+6. Move semantic-router embedding calls to the persistent Embedding socket.
 7. Tune thresholds and benchmark latency.
 
-This order reduces risk: first fix the transport foundation for the highest
-latency path, then add semantic routing, then finish the ecosystem-wide
-persistent transport migration.
+The LLM Host persistent transport foundation is now the first implemented
+slice. The remaining order finishes the same rule across retrieval and
+embedding before semantic routing becomes a high-volume hot path.
 
 ## Open Decisions
 
@@ -318,13 +326,10 @@ persistent transport migration.
 - Should the semantic router live only inside the orchestrator, or become a
   reusable package/config shared by future agents?
 - What are the first production thresholds for score and score margin?
-- Do we keep one-request WebSocket endpoints permanently for compatibility, or
-  deprecate them after the persistent service stream is stable?
 - How should pending in-flight requests behave after reconnect: fail fast,
   retry only idempotent internal calls, or let each caller specify policy?
 
 ## Immediate Next Task
 
-Create the v3 contract change for persistent multiplexed service streams. The
-orchestrator should not hard-depend on a protocol that the contracts still
-describe as one request per WebSocket connection.
+Implement persistent RAG Engine retrieval transport and move the orchestrator's
+RAG client off per-retrieval WebSocket connections.
