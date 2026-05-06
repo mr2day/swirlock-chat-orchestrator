@@ -5,6 +5,8 @@ import type { ServiceConfig } from '../config/config';
 import type { DatabaseService } from '../database/database.service';
 import type { RagContext, RagService } from '../rag/rag.service';
 import type { SubmitTurnDto } from './dto/submit-turn.dto';
+import type { UtilityTurnDecision } from './turn-classification';
+import type { UtilityTurnClassifierService } from './utility-turn-classifier.service';
 
 interface TestMessageRow {
   id: string;
@@ -39,6 +41,12 @@ const CONFIG: ServiceConfig = {
     callerService: 'chat-orchestrator',
     timeoutMs: 120000,
   },
+  utilityLlmHost: {
+    baseUrl: 'http://127.0.0.1:3213',
+    callerService: 'chat-orchestrator:turn-classifier',
+    timeoutMs: 30000,
+    priority: 50,
+  },
   rag: {
     enabled: true,
     baseUrl: 'http://127.0.0.1:3001',
@@ -66,7 +74,30 @@ function makeDto(text: string): SubmitTurnDto {
   };
 }
 
-function makeService(history: TestMessageRow[] = []) {
+function makeDecision(
+  overrides: Partial<UtilityTurnDecision> = {},
+): UtilityTurnDecision {
+  return {
+    route: 'final_answer',
+    shouldRetrieve: false,
+    shouldThink: false,
+    includeMemoryInPrompt: true,
+    includeRecentConversationInPrompt: true,
+    resolvedQueryText: 'Hi',
+    intent: 'general',
+    freshness: 'medium',
+    allowedModes: [],
+    hints: [],
+    confidence: 'high',
+    reason: 'Test decision.',
+    ...overrides,
+  };
+}
+
+function makeService(
+  history: TestMessageRow[] = [],
+  decision: UtilityTurnDecision = makeDecision(),
+) {
   const prepare = jest.fn((sql: string) => {
     if (sql.includes('SELECT * FROM sessions')) {
       return {
@@ -104,76 +135,103 @@ function makeService(history: TestMessageRow[] = []) {
     .fn()
     .mockResolvedValue(EMPTY_RAG);
   const rag = { retrieve } as unknown as RagService;
+  const classifier = {
+    classify: jest.fn().mockResolvedValue(decision),
+  } as unknown as UtilityTurnClassifierService;
   const service = new ChatService(
     CONFIG,
     db,
     rag,
-    new TurnPlannerService(),
+    new TurnPlannerService(classifier),
     new PromptBuilderService(),
   );
 
-  return { service, retrieve };
+  return { service, retrieve, classifier };
 }
 
 describe('ChatService turn planning', () => {
-  it('does not call RAG for a greeting', async () => {
-    const { service, retrieve } = makeService([
-      {
-        id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
-        session_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
-        turn_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
-        role: 'assistant',
-        content: 'Louis Malle was a French film director.',
-        parts_json: null,
-        created_at: '2026-05-06T07:00:10.000Z',
-        seq: 1,
-      },
-    ]);
+  it('uses a utility standard-answer decision for a status check', async () => {
+    const { service, retrieve, classifier } = makeService(
+      [
+        {
+          id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
+          session_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
+          turn_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
+          role: 'assistant',
+          content: 'Louis Malle was a French film director.',
+          parts_json: null,
+          created_at: '2026-05-06T07:00:10.000Z',
+          seq: 1,
+        },
+      ],
+      makeDecision({
+        route: 'standard_answer',
+        standardAnswerKey: 'status_check',
+        includeMemoryInPrompt: false,
+        includeRecentConversationInPrompt: false,
+        resolvedQueryText: 'how are you today?',
+        reason: 'Social status check; answer from standardized table.',
+      }),
+    );
 
     const prepared = await service.prepareTurn({
       sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
-      dto: makeDto('Hi'),
+      dto: makeDto('how are you today?'),
       correlationId: 'turn-1',
       authUserId: 'dev-user',
     });
 
+    expect(classifier.classify).toHaveBeenCalledTimes(1);
     expect(retrieve).not.toHaveBeenCalled();
     expect(prepared.ragContext.retrievalMode).toBe('none');
     expect(prepared.turnPlan.shouldRetrieve).toBe(false);
     expect(prepared.turnPlan.shouldThink).toBe(false);
-    const promptPart = prepared.llmParts[0];
-    expect(promptPart?.type).toBe('text');
-    if (promptPart?.type !== 'text') {
-      throw new Error('Expected first LLM part to be text.');
-    }
-    expect(promptPart.text).toContain('does not need retrieval');
-    expect(promptPart.text).not.toContain('Louis Malle');
-    expect(promptPart.text).not.toContain('Recent conversation:');
+    expect(prepared.llmParts).toEqual([]);
+    expect(prepared.directAssistantText).toBe(
+      "I'm functioning normally and ready to help. How can I help?",
+    );
   });
 
   it('resolves elliptical follow-up questions before calling RAG', async () => {
-    const { service, retrieve } = makeService([
-      {
-        id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
-        session_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
-        turn_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
-        role: 'user',
-        content: 'Who was Louis Malle?',
-        parts_json: null,
-        created_at: '2026-05-06T07:00:00.000Z',
-        seq: 1,
-      },
-      {
-        id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567802',
-        session_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
-        turn_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
-        role: 'assistant',
-        content: 'Louis Malle was a French film director.',
-        parts_json: null,
-        created_at: '2026-05-06T07:00:10.000Z',
-        seq: 2,
-      },
-    ]);
+    const { service, retrieve } = makeService(
+      [
+        {
+          id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
+          session_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
+          turn_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
+          role: 'user',
+          content: 'Who was Louis Malle?',
+          parts_json: null,
+          created_at: '2026-05-06T07:00:00.000Z',
+          seq: 1,
+        },
+        {
+          id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567802',
+          session_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
+          turn_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
+          role: 'assistant',
+          content: 'Louis Malle was a French film director.',
+          parts_json: null,
+          created_at: '2026-05-06T07:00:10.000Z',
+          seq: 2,
+        },
+      ],
+      makeDecision({
+        route: 'retrieve',
+        shouldRetrieve: true,
+        includeMemoryInPrompt: true,
+        includeRecentConversationInPrompt: true,
+        resolvedQueryText: 'Louis Malle relationships and number of children',
+        intent: 'follow-up',
+        allowedModes: ['local_rag', 'live_web'],
+        hints: [
+          {
+            kind: 'entity',
+            text: 'Active conversation subject: Louis Malle',
+          },
+        ],
+      }),
+    );
 
     await service.prepareTurn({
       sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
@@ -195,7 +253,23 @@ describe('ChatService turn planning', () => {
   });
 
   it('marks current weather questions as realtime retrieval', async () => {
-    const { service, retrieve } = makeService();
+    const { service, retrieve } = makeService(
+      [],
+      makeDecision({
+        route: 'retrieve',
+        shouldRetrieve: true,
+        resolvedQueryText: 'current temperature in Bucharest',
+        intent: 'current-weather',
+        freshness: 'realtime',
+        allowedModes: ['local_rag', 'live_web'],
+        hints: [
+          {
+            kind: 'time_reference',
+            text: 'Client turn timestamp: 2026-05-06T08:00:00.000Z',
+          },
+        ],
+      }),
+    );
 
     await service.prepareTurn({
       sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',

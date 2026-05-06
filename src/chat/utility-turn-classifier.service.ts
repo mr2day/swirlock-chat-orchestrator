@@ -1,0 +1,328 @@
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { SERVICE_CONFIG } from '../config/config';
+import type { ServiceConfig } from '../config/config';
+import { LlmHostService } from '../llm-host/llm-host.service';
+import type { RagAllowedMode, RagFreshness, RagHint } from '../rag/rag.service';
+import type { ConversationMessage } from './turn-planner.service';
+import type {
+  StandardAnswerKey,
+  TurnDecisionConfidence,
+  TurnRoute,
+  UtilityTurnDecision,
+} from './turn-classification';
+
+export interface ClassifyTurnInput {
+  correlationId: string;
+  userText: string;
+  occurredAt: string;
+  history: ConversationMessage[];
+  defaultFreshness: RagFreshness;
+  defaultAllowedModes: RagAllowedMode[];
+  abortSignal?: AbortSignal;
+}
+
+const ROUTES: TurnRoute[] = [
+  'standard_answer',
+  'final_answer',
+  'retrieve',
+  'retrieve_and_think',
+  'think',
+  'clarify',
+];
+
+const STANDARD_ANSWER_KEYS: StandardAnswerKey[] = [
+  'greeting',
+  'status_check',
+  'acknowledgement',
+  'thanks',
+  'goodbye',
+  'clarify',
+];
+
+const FRESHNESS_VALUES: RagFreshness[] = ['low', 'medium', 'high', 'realtime'];
+const CONFIDENCE_VALUES: TurnDecisionConfidence[] = ['low', 'medium', 'high'];
+const HINT_KINDS: RagHint['kind'][] = [
+  'entity',
+  'time_reference',
+  'preference',
+  'disambiguation',
+  'constraint',
+];
+
+@Injectable()
+export class UtilityTurnClassifierService {
+  private readonly log = new Logger(UtilityTurnClassifierService.name);
+
+  constructor(
+    @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
+    private readonly llm: LlmHostService,
+  ) {}
+
+  async classify(input: ClassifyTurnInput): Promise<UtilityTurnDecision> {
+    try {
+      const result = await this.llm.infer({
+        correlationId: input.correlationId,
+        baseUrl: this.utilityBaseUrl(),
+        callerService: this.utilityCallerService(),
+        timeoutMs: this.utilityTimeoutMs(),
+        priority: this.utilityPriority(),
+        parts: [{ type: 'text', text: this.buildPrompt(input) }],
+        options: {
+          responseFormat: 'json',
+          thinking: false,
+          ollama: { temperature: 0 },
+        },
+        abortSignal: input.abortSignal,
+      });
+
+      return this.normalizeDecision(result.text, input);
+    } catch (error) {
+      this.log.warn(
+        `[${input.correlationId}] Utility turn classifier unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return this.fallbackDecision(input);
+    }
+  }
+
+  private buildPrompt(input: ClassifyTurnInput): string {
+    const allowedModes = input.defaultAllowedModes.join(', ') || '(none)';
+    const recent = input.history.slice(-8).map((message) => ({
+      role: message.role,
+      content: this.limitText(message.content, 500),
+      createdAt: message.created_at,
+    }));
+
+    return [
+      'You are the Swirlock turn-routing Utility LLM.',
+      'This is an internal orchestration call, not a chat reply. Return only valid JSON.',
+      'Your job is to classify the user turn before any retrieval, memory prompt assembly, or final-answer generation.',
+      '',
+      'Allowed routes:',
+      '- standard_answer: code should answer from a standardized answer table. No retrieval. No final-answer LLM. No thinking.',
+      '- final_answer: final-answer LLM should answer without retrieval and without thinking.',
+      '- retrieve: RAG should gather evidence, then final-answer LLM should answer without thinking.',
+      '- retrieve_and_think: RAG should gather evidence, then final-answer LLM may use thinking.',
+      '- think: final-answer LLM should use thinking without retrieval.',
+      '- clarify: code should ask a short clarification from the standardized answer table. No retrieval. No thinking.',
+      '',
+      'Standard answer keys:',
+      '- greeting',
+      '- status_check',
+      '- acknowledgement',
+      '- thanks',
+      '- goodbye',
+      '- clarify',
+      '',
+      'Routing requirements:',
+      '- Choose standard_answer for casual greetings, social check-ins, acknowledgements, thanks, and goodbyes.',
+      '- Choose retrieval only when external evidence or current factual data is needed for a good answer.',
+      '- Choose thinking only when the turn needs multi-step reasoning, planning, debugging, comparison, or synthesis.',
+      '- For standard_answer and clarify, set includeMemoryInPrompt=false and includeRecentConversationInPrompt=false.',
+      '- For retrieve routes, rewrite resolvedQueryText into a self-contained search query using recent conversation only when needed.',
+      '- Use only allowed retrieval modes from this deployment.',
+      '',
+      'Return this JSON object shape:',
+      JSON.stringify({
+        route: 'standard_answer',
+        standardAnswerKey: 'status_check',
+        resolvedQueryText: 'original or rewritten user query',
+        intent: 'brief intent label',
+        freshness: input.defaultFreshness,
+        allowedModes: input.defaultAllowedModes,
+        hints: [{ kind: 'time_reference', text: 'optional hint' }],
+        includeMemoryInPrompt: false,
+        includeRecentConversationInPrompt: false,
+        confidence: 'high',
+        reason: 'short operational reason',
+      }),
+      '',
+      `Current client timestamp: ${input.occurredAt}`,
+      `Default retrieval freshness: ${input.defaultFreshness}`,
+      `Allowed retrieval modes: ${allowedModes}`,
+      '',
+      'Recent conversation JSON:',
+      JSON.stringify(recent),
+      '',
+      'Current user message:',
+      input.userText,
+    ].join('\n');
+  }
+
+  private normalizeDecision(
+    rawText: string,
+    input: ClassifyTurnInput,
+  ): UtilityTurnDecision {
+    const parsed = this.parseJsonObject(rawText);
+    if (!parsed) return this.fallbackDecision(input);
+
+    const route = this.pickEnum(parsed.route, ROUTES, 'final_answer');
+    const standardAnswerKey = this.pickOptionalEnum(
+      parsed.standardAnswerKey,
+      STANDARD_ANSWER_KEYS,
+    );
+    const shouldRetrieve =
+      route === 'retrieve' || route === 'retrieve_and_think';
+    const shouldThink = route === 'think' || route === 'retrieve_and_think';
+    const directRoute = route === 'standard_answer' || route === 'clarify';
+    const resolvedQueryText = this.stringValue(
+      parsed.resolvedQueryText,
+      input.userText,
+    );
+
+    return {
+      route,
+      ...(directRoute
+        ? {
+            standardAnswerKey:
+              standardAnswerKey ??
+              (route === 'clarify' ? 'clarify' : 'acknowledgement'),
+          }
+        : {}),
+      shouldRetrieve,
+      shouldThink,
+      includeMemoryInPrompt: directRoute
+        ? false
+        : this.booleanValue(parsed.includeMemoryInPrompt, true),
+      includeRecentConversationInPrompt: directRoute
+        ? false
+        : this.booleanValue(parsed.includeRecentConversationInPrompt, true),
+      resolvedQueryText,
+      intent: this.limitText(this.stringValue(parsed.intent, 'general'), 80),
+      freshness: this.pickEnum(
+        parsed.freshness,
+        FRESHNESS_VALUES,
+        input.defaultFreshness,
+      ),
+      allowedModes: shouldRetrieve
+        ? this.allowedModes(parsed.allowedModes, input.defaultAllowedModes)
+        : [],
+      hints: shouldRetrieve ? this.hints(parsed.hints) : [],
+      confidence: this.pickEnum(parsed.confidence, CONFIDENCE_VALUES, 'medium'),
+      reason: this.limitText(
+        this.stringValue(parsed.reason, 'Utility classifier selected route.'),
+        240,
+      ),
+    };
+  }
+
+  private fallbackDecision(input: ClassifyTurnInput): UtilityTurnDecision {
+    return {
+      route: 'final_answer',
+      shouldRetrieve: false,
+      shouldThink: false,
+      includeMemoryInPrompt: true,
+      includeRecentConversationInPrompt: true,
+      resolvedQueryText: input.userText,
+      intent: 'general',
+      freshness: input.defaultFreshness,
+      allowedModes: [],
+      hints: [],
+      confidence: 'low',
+      reason:
+        'Utility classifier failed or returned invalid JSON; using final answer without retrieval or thinking.',
+    };
+  }
+
+  private parseJsonObject(value: string): Record<string, unknown> | null {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (this.isRecord(parsed)) return parsed;
+    } catch {
+      const match = value.match(/\{[\s\S]*\}/);
+      if (!match) return null;
+      try {
+        const parsed = JSON.parse(match[0]) as unknown;
+        if (this.isRecord(parsed)) return parsed;
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  private allowedModes(
+    value: unknown,
+    defaults: RagAllowedMode[],
+  ): RagAllowedMode[] {
+    if (!Array.isArray(value)) return [...defaults];
+    const out = value.filter(
+      (mode): mode is RagAllowedMode =>
+        (mode === 'local_rag' || mode === 'live_web') &&
+        defaults.includes(mode),
+    );
+    return out.length > 0 ? out : [...defaults];
+  }
+
+  private hints(value: unknown): RagHint[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((item): item is Record<string, unknown> => this.isRecord(item))
+      .map((item) => ({
+        kind: this.pickEnum(item.kind, HINT_KINDS, 'constraint'),
+        text: this.limitText(this.stringValue(item.text, ''), 240),
+      }))
+      .filter((hint) => hint.text.length > 0)
+      .slice(0, 8);
+  }
+
+  private pickEnum<T extends string>(
+    value: unknown,
+    allowed: readonly T[],
+    fallback: T,
+  ): T {
+    return typeof value === 'string' && allowed.includes(value as T)
+      ? (value as T)
+      : fallback;
+  }
+
+  private pickOptionalEnum<T extends string>(
+    value: unknown,
+    allowed: readonly T[],
+  ): T | undefined {
+    return typeof value === 'string' && allowed.includes(value as T)
+      ? (value as T)
+      : undefined;
+  }
+
+  private stringValue(value: unknown, fallback: string): string {
+    if (typeof value !== 'string') return fallback;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : fallback;
+  }
+
+  private booleanValue(value: unknown, fallback: boolean): boolean {
+    return typeof value === 'boolean' ? value : fallback;
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  private utilityBaseUrl(): string {
+    return this.cfg.utilityLlmHost?.baseUrl ?? this.cfg.llmHost.baseUrl;
+  }
+
+  private utilityCallerService(): string {
+    return (
+      this.cfg.utilityLlmHost?.callerService ??
+      `${this.cfg.llmHost.callerService}:turn-classifier`
+    );
+  }
+
+  private utilityTimeoutMs(): number {
+    return this.cfg.utilityLlmHost?.timeoutMs ?? this.cfg.llmHost.timeoutMs;
+  }
+
+  private utilityPriority(): number | undefined {
+    return this.cfg.utilityLlmHost?.priority;
+  }
+
+  private limitText(value: string, maxLength: number): string {
+    const normalized = value.replace(/\s+/g, ' ').trim();
+    if (normalized.length <= maxLength) return normalized;
+    return `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
+  }
+}

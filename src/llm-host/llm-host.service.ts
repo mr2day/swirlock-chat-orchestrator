@@ -31,6 +31,12 @@ export interface LlmInferOptions {
   ollama?: Record<string, unknown>;
 }
 
+export interface LlmInferResult {
+  finishReason: 'stop' | 'length' | 'error';
+  text: string;
+  appliedOptions?: LlmInferOptions;
+}
+
 export interface QueueWaitInfo {
   position: number;
   requestsAhead: number;
@@ -73,6 +79,77 @@ export class LlmHostService {
 
   constructor(@Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig) {}
 
+  async infer(args: {
+    correlationId: string;
+    parts: LlmInputPart[];
+    options?: LlmInferOptions;
+    baseUrl?: string;
+    callerService?: string;
+    timeoutMs?: number;
+    priority?: number;
+    abortSignal?: AbortSignal;
+  }): Promise<LlmInferResult> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, args.timeoutMs ?? this.cfg.llmHost.timeoutMs);
+
+    const onAbort = (): void => controller.abort();
+    args.abortSignal?.addEventListener('abort', onAbort, { once: true });
+
+    try {
+      const res = await fetch(
+        this.httpUrl(args.baseUrl ?? this.cfg.llmHost.baseUrl, '/v2/infer'),
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-correlation-id': args.correlationId,
+          },
+          body: JSON.stringify({
+            requestContext: this.buildRequestContext(args),
+            input: { parts: args.parts },
+            ...(args.options ? { options: args.options } : {}),
+          }),
+          signal: controller.signal,
+        },
+      );
+
+      if (!res.ok) {
+        throw new ServiceUnavailableException(
+          `LLM Host infer failed with HTTP ${res.status}`,
+        );
+      }
+
+      const payload = (await res.json()) as {
+        data?: {
+          output?: { text?: unknown };
+          finishReason?: unknown;
+          appliedOptions?: LlmInferOptions;
+        };
+      };
+
+      return {
+        finishReason: this.normalizeFinishReason(payload.data?.finishReason),
+        text:
+          typeof payload.data?.output?.text === 'string'
+            ? payload.data.output.text
+            : '',
+        ...(payload.data?.appliedOptions
+          ? { appliedOptions: payload.data.appliedOptions }
+          : {}),
+      };
+    } catch (err) {
+      if (err instanceof ServiceUnavailableException) throw err;
+      throw new ServiceUnavailableException(
+        err instanceof Error ? err.message : 'LLM Host infer failed',
+      );
+    } finally {
+      clearTimeout(timeout);
+      args.abortSignal?.removeEventListener('abort', onAbort);
+    }
+  }
+
   /**
    * Opens the upstream Model Host WebSocket at /v2/infer/stream, sends one
    * StreamInferMessage, and forwards every event to `onEvent` until `done`
@@ -84,12 +161,14 @@ export class LlmHostService {
     correlationId: string;
     parts: LlmInputPart[];
     options?: LlmInferOptions;
+    baseUrl?: string;
+    callerService?: string;
     priority?: number;
     onEvent: (event: LlmStreamEvent) => void;
     abortSignal?: AbortSignal;
   }): Promise<LlmStreamResult> {
     const wsUrl =
-      this.cfg.llmHost.baseUrl
+      (args.baseUrl ?? this.cfg.llmHost.baseUrl)
         .replace(/^http:/i, 'ws:')
         .replace(/^https:/i, 'wss:')
         .replace(/\/$/, '') + '/v2/infer/stream';
@@ -190,16 +269,35 @@ export class LlmHostService {
   private buildInferRequest(args: {
     parts: LlmInputPart[];
     options?: LlmInferOptions;
+    callerService?: string;
     priority?: number;
   }) {
     return {
-      requestContext: {
-        callerService: this.cfg.llmHost.callerService,
-        ...(args.priority === undefined ? {} : { priority: args.priority }),
-        requestedAt: new Date().toISOString(),
-      },
+      requestContext: this.buildRequestContext(args),
       input: { parts: args.parts },
       ...(args.options ? { options: args.options } : {}),
     };
+  }
+
+  private buildRequestContext(args: {
+    callerService?: string;
+    priority?: number;
+  }) {
+    return {
+      callerService: args.callerService ?? this.cfg.llmHost.callerService,
+      ...(args.priority === undefined ? {} : { priority: args.priority }),
+      requestedAt: new Date().toISOString(),
+    };
+  }
+
+  private httpUrl(baseUrl: string, path: string): string {
+    return `${baseUrl.replace(/\/$/, '')}${path}`;
+  }
+
+  private normalizeFinishReason(value: unknown): 'stop' | 'length' | 'error' {
+    if (value === 'stop' || value === 'length' || value === 'error') {
+      return value;
+    }
+    return 'error';
   }
 }

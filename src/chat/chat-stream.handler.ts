@@ -178,45 +178,51 @@ export class ChatStreamHandler {
       prepared.turnPlan.shouldThink,
     );
 
-    try {
-      const result = await this.llm.streamInfer({
-        correlationId: ctx.correlationId,
-        parts: prepared.llmParts,
-        options: { thinking: wantThinking },
-        abortSignal: abort.signal,
-        onEvent: (evt) => {
-          switch (evt.type) {
-            case 'queued':
-              send({ type: 'queued', meta: meta(), data: evt.data });
-              break;
-            case 'started':
-              send({ type: 'started', meta: meta() });
-              break;
-            case 'thinking':
-              send({ type: 'thinking', meta: meta(), data: evt.data });
-              break;
-            case 'chunk':
-              send({ type: 'chunk', meta: meta(), data: evt.data });
-              break;
-            // 'accepted' from upstream is dropped; the orchestrator's own
-            // `accepted` already signaled to the client that we started work.
-            // 'done' and 'error' are handled via the streamInfer result/throw.
-            default:
-              break;
-          }
-        },
-      });
-      assistantText = result.text;
-      finishReason = result.finishReason;
-    } catch (err) {
-      const status =
-        err instanceof ServiceUnavailableException
-          ? 503
-          : err instanceof HttpException
-            ? err.getStatus()
-            : 500;
-      closeWithError(status, (err as Error).message);
-      return;
+    if (prepared.directAssistantText) {
+      assistantText = prepared.directAssistantText;
+      send({ type: 'started', meta: meta() });
+      send({ type: 'chunk', meta: meta(), data: { text: assistantText } });
+    } else {
+      try {
+        const result = await this.llm.streamInfer({
+          correlationId: ctx.correlationId,
+          parts: prepared.llmParts,
+          options: { thinking: wantThinking },
+          abortSignal: abort.signal,
+          onEvent: (evt) => {
+            switch (evt.type) {
+              case 'queued':
+                send({ type: 'queued', meta: meta(), data: evt.data });
+                break;
+              case 'started':
+                send({ type: 'started', meta: meta() });
+                break;
+              case 'thinking':
+                send({ type: 'thinking', meta: meta(), data: evt.data });
+                break;
+              case 'chunk':
+                send({ type: 'chunk', meta: meta(), data: evt.data });
+                break;
+              // 'accepted' from upstream is dropped; the orchestrator's own
+              // `accepted` already signaled to the client that we started work.
+              // 'done' and 'error' are handled via the streamInfer result/throw.
+              default:
+                break;
+            }
+          },
+        });
+        assistantText = result.text;
+        finishReason = result.finishReason;
+      } catch (err) {
+        const status =
+          err instanceof ServiceUnavailableException
+            ? 503
+            : err instanceof HttpException
+              ? err.getStatus()
+              : 500;
+        closeWithError(status, (err as Error).message);
+        return;
+      }
     }
 
     if (assistantText.length === 0) {

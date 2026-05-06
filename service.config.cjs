@@ -66,6 +66,15 @@ const env = {
     timeoutMs: 120000,
   },
 
+  // Internal support-cognition calls. The turn classifier is not part of the
+  // persisted conversation and always disables model thinking.
+  utilityLlmHost: {
+    baseUrl: 'http://127.0.0.1:3213',
+    callerService: 'chat-orchestrator:turn-classifier',
+    timeoutMs: 30000,
+    priority: 50,
+  },
+
   // RAG Engine endpoint. The orchestrator uses the WebSocket stream so it can
   // forward retrieval progress to connected chat clients before final-answer
   // inference starts.

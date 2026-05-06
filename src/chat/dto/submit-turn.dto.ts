@@ -66,8 +66,9 @@ class OptionsDto {
   includeDiagnostics?: boolean;
 
   /**
-   * Allows upstream `thinking` events when the orchestrator's turn planner
-   * decides the turn is complex enough. Use `forceThinking` to override.
+   * Allows upstream `thinking` events when the orchestrator's utility turn
+   * classifier decides the turn is complex enough. Use `forceThinking` to
+   * override.
    */
   @IsOptional()
   @IsBoolean()
@@ -76,7 +77,7 @@ class OptionsDto {
   /**
    * Explicitly force upstream `thinking` events. This is separate from the
    * legacy `thinking` boolean so older clients that always send
-   * `thinking: true` still get automatic planner behavior.
+   * `thinking: true` still get automatic classifier behavior.
    */
   @IsOptional()
   @IsBoolean()

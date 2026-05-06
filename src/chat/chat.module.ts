@@ -7,6 +7,7 @@ import { ChatService } from './chat.service';
 import { ChatStreamHandler } from './chat-stream.handler';
 import { PromptBuilderService } from './prompt-builder.service';
 import { TurnPlannerService } from './turn-planner.service';
+import { UtilityTurnClassifierService } from './utility-turn-classifier.service';
 
 @Module({
   imports: [AuthModule, LlmHostModule, RagModule],
@@ -15,6 +16,7 @@ import { TurnPlannerService } from './turn-planner.service';
     ChatService,
     ChatStreamHandler,
     TurnPlannerService,
+    UtilityTurnClassifierService,
     PromptBuilderService,
   ],
   exports: [ChatStreamHandler],

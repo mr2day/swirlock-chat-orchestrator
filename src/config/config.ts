@@ -16,6 +16,10 @@ export interface LlmHostConfig {
   timeoutMs: number;
 }
 
+export interface UtilityLlmHostConfig extends LlmHostConfig {
+  priority: number;
+}
+
 export interface RagConfig {
   enabled: boolean;
   baseUrl: string | null;
@@ -44,6 +48,7 @@ export interface ServiceConfig {
   devUser: DevUserConfig;
   database: DatabaseConfig;
   llmHost: LlmHostConfig;
+  utilityLlmHost?: UtilityLlmHostConfig;
   rag: RagConfig;
   http?: HttpConfig;
 }
@@ -78,6 +83,22 @@ function validate(c: ServiceConfig): void {
   must(c.llmHost?.baseUrl, 'llmHost.baseUrl required');
   must(c.llmHost?.callerService, 'llmHost.callerService required');
   must(typeof c.llmHost?.timeoutMs === 'number', 'llmHost.timeoutMs required');
+  if (c.utilityLlmHost !== undefined) {
+    must(c.utilityLlmHost.baseUrl, 'utilityLlmHost.baseUrl required');
+    must(
+      c.utilityLlmHost.callerService,
+      'utilityLlmHost.callerService required',
+    );
+    must(
+      typeof c.utilityLlmHost.timeoutMs === 'number',
+      'utilityLlmHost.timeoutMs required',
+    );
+    must(
+      typeof c.utilityLlmHost.priority === 'number' &&
+        Number.isFinite(c.utilityLlmHost.priority),
+      'utilityLlmHost.priority must be a finite number',
+    );
+  }
   must(typeof c.rag?.enabled === 'boolean', 'rag.enabled required');
   if (!c.rag) throw new Error('service.config.cjs invalid: rag required');
   const rag = c.rag;
