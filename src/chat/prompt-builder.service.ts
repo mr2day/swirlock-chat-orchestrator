@@ -19,6 +19,7 @@ export class PromptBuilderService {
   build(input: BuildPromptInput): string {
     const lines: string[] = [
       'You are the Swirlock assistant. Answer the user concisely, helpfully, and honestly.',
+      'Reply in the same language the user used unless they explicitly ask for another language.',
       'Use retrieved evidence when it is available. If the evidence is insufficient for a factual or current claim, say what is missing instead of guessing.',
       `Current client timestamp: ${input.occurredAt}`,
       `Retrieval plan: ${input.turnPlan.planReason}`,

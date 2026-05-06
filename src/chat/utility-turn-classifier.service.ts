@@ -48,6 +48,33 @@ const HINT_KINDS: RagHint['kind'][] = [
   'constraint',
 ];
 
+const TURN_CATEGORIES = [
+  'pure_greeting',
+  'social_status',
+  'acknowledgement',
+  'thanks',
+  'goodbye',
+  'assistant_identity',
+  'assistant_capability',
+  'content_request',
+  'factual_question',
+  'coding_request',
+  'other',
+] as const;
+
+type TurnCategory = (typeof TURN_CATEGORIES)[number];
+
+const STANDARD_CATEGORY_BY_KEY: Record<
+  Exclude<StandardAnswerKey, 'clarify'>,
+  TurnCategory
+> = {
+  greeting: 'pure_greeting',
+  status_check: 'social_status',
+  acknowledgement: 'acknowledgement',
+  thanks: 'thanks',
+  goodbye: 'goodbye',
+};
+
 @Injectable()
 export class UtilityTurnClassifierService {
   private readonly log = new Logger(UtilityTurnClassifierService.name);
@@ -115,8 +142,13 @@ export class UtilityTurnClassifierService {
       '- clarify is not a standardized answer key.',
       '',
       'Routing requirements:',
+      '- Classify the meaning of the message across languages, not only English surface words.',
       '- Choose standard_answer for casual greetings, social check-ins, acknowledgements, thanks, and goodbyes.',
       '- For "how are you" style social check-ins, choose standardAnswerKey=status_check, not greeting.',
+      '- The standardized answer table is English-only; choose standard_answer only when the user message is primarily English.',
+      '- Do not choose standard_answer for content-bearing questions, even when they are socially phrased.',
+      '- Questions about the assistant name, identity, model, persona, or capabilities are content-bearing assistant_identity or assistant_capability turns; choose final_answer.',
+      '- Example: Romanian "cum te cheama" means "what is your name"; route final_answer with turnCategory=assistant_identity and userLanguage=ro.',
       '- Choose retrieval only when external evidence or current factual data is needed for a good answer.',
       '- Choose thinking only when the turn needs multi-step reasoning, planning, debugging, comparison, or synthesis.',
       '- Do not choose clarify for requests that can be answered with a reasonable assumption or a generic example.',
@@ -129,6 +161,8 @@ export class UtilityTurnClassifierService {
       JSON.stringify({
         route: 'standard_answer',
         standardAnswerKey: 'status_check',
+        turnCategory: 'social_status',
+        userLanguage: 'en',
         resolvedQueryText: 'original or rewritten user query',
         intent: 'brief intent label',
         freshness: input.defaultFreshness,
@@ -164,7 +198,24 @@ export class UtilityTurnClassifierService {
       parsed.standardAnswerKey,
       STANDARD_ANSWER_KEYS,
     );
-    if (route === 'standard_answer' && !standardAnswerKey) {
+    const turnCategory = this.pickEnum(
+      parsed.turnCategory,
+      TURN_CATEGORIES,
+      'other',
+    );
+    const userLanguage = this.limitText(
+      this.stringValue(parsed.userLanguage, 'unknown').toLowerCase(),
+      20,
+    );
+    if (
+      route === 'standard_answer' &&
+      (!standardAnswerKey ||
+        !this.canUseStandardAnswer(
+          standardAnswerKey,
+          turnCategory,
+          userLanguage,
+        ))
+    ) {
       route = 'final_answer';
     }
     const shouldRetrieve =
@@ -321,6 +372,21 @@ export class UtilityTurnClassifierService {
 
   private utilityPriority(): number | undefined {
     return this.cfg.utilityLlmHost?.priority;
+  }
+
+  private canUseStandardAnswer(
+    key: StandardAnswerKey,
+    turnCategory: TurnCategory,
+    userLanguage: string,
+  ): key is Exclude<StandardAnswerKey, 'clarify'> {
+    if (key === 'clarify') return false;
+    if (!this.isEnglishLanguage(userLanguage)) return false;
+    return STANDARD_CATEGORY_BY_KEY[key] === turnCategory;
+  }
+
+  private isEnglishLanguage(value: string): boolean {
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'en' || normalized.startsWith('en-');
   }
 
   private limitText(value: string, maxLength: number): string {
