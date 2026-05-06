@@ -74,6 +74,16 @@ function makeDto(text: string): SubmitTurnDto {
   };
 }
 
+function makeDtoWithOptions(
+  text: string,
+  options: SubmitTurnDto['options'],
+): SubmitTurnDto {
+  return {
+    ...makeDto(text),
+    options,
+  };
+}
+
 function makeDecision(
   overrides: Partial<UtilityTurnDecision> = {},
 ): UtilityTurnDecision {
@@ -190,6 +200,65 @@ describe('ChatService turn planning', () => {
     expect(prepared.directAssistantText).toBe(
       "I'm functioning normally and ready to help. How can I help?",
     );
+  });
+
+  it('does not bypass the final LLM when forceThinking is enabled', async () => {
+    const { service, retrieve } = makeService(
+      [],
+      makeDecision({
+        route: 'standard_answer',
+        standardAnswerKey: 'status_check',
+        includeMemoryInPrompt: false,
+        includeRecentConversationInPrompt: false,
+        resolvedQueryText: 'how are you today?',
+        reason: 'Social status check; answer from standardized table.',
+      }),
+    );
+
+    const prepared = await service.prepareTurn({
+      sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
+      dto: makeDtoWithOptions('how are you today?', {
+        includeDiagnostics: true,
+        forceThinking: true,
+      }),
+      correlationId: 'turn-force-thinking',
+      authUserId: 'dev-user',
+    });
+
+    expect(retrieve).not.toHaveBeenCalled();
+    expect(prepared.directAssistantText).toBeUndefined();
+    expect(prepared.llmParts[0]?.type).toBe('text');
+  });
+
+  it('does not use the generic direct clarification answer', async () => {
+    const { service, retrieve } = makeService(
+      [],
+      makeDecision({
+        route: 'standard_answer',
+        standardAnswerKey: 'clarify',
+        shouldRetrieve: false,
+        shouldThink: false,
+        includeMemoryInPrompt: false,
+        includeRecentConversationInPrompt: false,
+        resolvedQueryText:
+          'define some Language Model Tools API as an example in the package.json',
+        intent: 'request for code example',
+        reason: 'Classifier asked for clarification.',
+      }),
+    );
+
+    const prepared = await service.prepareTurn({
+      sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
+      dto: makeDto(
+        'define some Language Model Tools API as an example in the package.json. Do not search, do it from your own knowledge.',
+      ),
+      correlationId: 'turn-clarify',
+      authUserId: 'dev-user',
+    });
+
+    expect(retrieve).not.toHaveBeenCalled();
+    expect(prepared.directAssistantText).toBeUndefined();
+    expect(prepared.llmParts[0]?.type).toBe('text');
   });
 
   it('resolves elliptical follow-up questions before calling RAG', async () => {

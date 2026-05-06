@@ -36,7 +36,6 @@ const STANDARD_ANSWER_KEYS: StandardAnswerKey[] = [
   'acknowledgement',
   'thanks',
   'goodbye',
-  'clarify',
 ];
 
 const FRESHNESS_VALUES: RagFreshness[] = ['low', 'medium', 'high', 'realtime'];
@@ -105,7 +104,7 @@ export class UtilityTurnClassifierService {
       '- retrieve: RAG should gather evidence, then final-answer LLM should answer without thinking.',
       '- retrieve_and_think: RAG should gather evidence, then final-answer LLM may use thinking.',
       '- think: final-answer LLM should use thinking without retrieval.',
-      '- clarify: code should ask a short clarification from the standardized answer table. No retrieval. No thinking.',
+      '- clarify: final-answer LLM should ask a targeted clarification. No retrieval. No thinking.',
       '',
       'Standard answer keys:',
       '- greeting: the user only greets or opens the conversation.',
@@ -113,14 +112,16 @@ export class UtilityTurnClassifierService {
       '- acknowledgement: the user acknowledges or confirms something without asking a new question.',
       '- thanks: the user thanks the assistant.',
       '- goodbye: the user ends the conversation.',
-      '- clarify: the user request is too underspecified to proceed.',
+      '- clarify is not a standardized answer key.',
       '',
       'Routing requirements:',
       '- Choose standard_answer for casual greetings, social check-ins, acknowledgements, thanks, and goodbyes.',
       '- For "how are you" style social check-ins, choose standardAnswerKey=status_check, not greeting.',
       '- Choose retrieval only when external evidence or current factual data is needed for a good answer.',
       '- Choose thinking only when the turn needs multi-step reasoning, planning, debugging, comparison, or synthesis.',
-      '- For standard_answer and clarify, set includeMemoryInPrompt=false and includeRecentConversationInPrompt=false.',
+      '- Do not choose clarify for requests that can be answered with a reasonable assumption or a generic example.',
+      '- Requests asking for "some", "an example", or "from your own knowledge" are sufficiently specified; choose final_answer or think unless external evidence is required.',
+      '- For standard_answer, set includeMemoryInPrompt=false and includeRecentConversationInPrompt=false.',
       '- For retrieve routes, rewrite resolvedQueryText into a self-contained search query using recent conversation only when needed.',
       '- Use only allowed retrieval modes from this deployment.',
       '',
@@ -158,15 +159,18 @@ export class UtilityTurnClassifierService {
     const parsed = this.parseJsonObject(rawText);
     if (!parsed) return this.fallbackDecision(input);
 
-    const route = this.pickEnum(parsed.route, ROUTES, 'final_answer');
+    let route = this.pickEnum(parsed.route, ROUTES, 'final_answer');
     const standardAnswerKey = this.pickOptionalEnum(
       parsed.standardAnswerKey,
       STANDARD_ANSWER_KEYS,
     );
+    if (route === 'standard_answer' && !standardAnswerKey) {
+      route = 'final_answer';
+    }
     const shouldRetrieve =
       route === 'retrieve' || route === 'retrieve_and_think';
     const shouldThink = route === 'think' || route === 'retrieve_and_think';
-    const directRoute = route === 'standard_answer' || route === 'clarify';
+    const directRoute = route === 'standard_answer';
     const resolvedQueryText = this.stringValue(
       parsed.resolvedQueryText,
       input.userText,
@@ -176,9 +180,7 @@ export class UtilityTurnClassifierService {
       route,
       ...(directRoute
         ? {
-            standardAnswerKey:
-              standardAnswerKey ??
-              (route === 'clarify' ? 'clarify' : 'acknowledgement'),
+            standardAnswerKey,
           }
         : {}),
       shouldRetrieve,

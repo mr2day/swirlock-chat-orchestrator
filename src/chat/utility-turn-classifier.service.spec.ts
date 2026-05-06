@@ -113,4 +113,44 @@ describe('UtilityTurnClassifierService', () => {
     expect(decision.shouldThink).toBe(false);
     expect(decision.confidence).toBe('low');
   });
+
+  it('does not allow clarify as a direct standardized answer', async () => {
+    const infer: jest.MockedFunction<LlmHostService['infer']> = jest
+      .fn()
+      .mockResolvedValue({
+        finishReason: 'stop',
+        text: JSON.stringify({
+          route: 'standard_answer',
+          standardAnswerKey: 'clarify',
+          resolvedQueryText:
+            'define some Language Model Tools API as an example in package.json',
+          intent: 'request for code example',
+          freshness: 'medium',
+          allowedModes: [],
+          hints: [],
+          includeMemoryInPrompt: false,
+          includeRecentConversationInPrompt: false,
+          confidence: 'high',
+          reason: 'Underspecified example request.',
+        }),
+      });
+    const service = new UtilityTurnClassifierService(CONFIG, {
+      infer,
+    } as unknown as LlmHostService);
+
+    const decision = await service.classify({
+      correlationId: 'turn-3',
+      userText:
+        'define some Language Model Tools API as an example in the package.json. Do not search, do it from your own knowledge.',
+      occurredAt: '2026-05-06T08:00:00.000Z',
+      history: [],
+      defaultFreshness: 'medium',
+      defaultAllowedModes: ['local_rag', 'live_web'],
+    });
+
+    expect(decision.route).toBe('final_answer');
+    expect(decision.standardAnswerKey).toBeUndefined();
+    expect(decision.shouldRetrieve).toBe(false);
+    expect(decision.shouldThink).toBe(false);
+  });
 });

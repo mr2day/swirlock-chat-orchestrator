@@ -225,7 +225,7 @@ export class ChatService {
         })
       : this.emptyRagContext();
 
-    const directAssistantText = turnPlan.standardAnswerKey
+    const directAssistantText = this.shouldUseDirectAnswer(dto, turnPlan)
       ? this.standardAnswerFor(turnPlan.standardAnswerKey)
       : undefined;
 
@@ -412,6 +412,17 @@ export class ChatService {
       retrievalMode: 'none',
       evidence: [],
     };
+  }
+
+  private shouldUseDirectAnswer(
+    dto: SubmitTurnDto,
+    turnPlan: TurnPlan,
+  ): turnPlan is TurnPlan & { standardAnswerKey: StandardAnswerKey } {
+    return (
+      dto.options?.forceThinking !== true &&
+      turnPlan.standardAnswerKey !== undefined &&
+      turnPlan.standardAnswerKey !== 'clarify'
+    );
   }
 
   private standardAnswerFor(key: StandardAnswerKey): string {
