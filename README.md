@@ -13,6 +13,7 @@ Built now:
 - conversation sessions stored directly in SQLite
 - RAG Engine integration over WebSocket, forwarding retrieval progress
   through the chat stream
+- client image input via `imageUrl` or pasted-image `imageBase64`
 - final-answer generation through Model Host WebSocket `/v2/infer/stream`
 - ecosystem turn submission is WebSocket-only
 

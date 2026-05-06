@@ -43,9 +43,15 @@ interface MessageRow {
   seq: number;
 }
 
+interface ChatImagePart {
+  imageUrl?: string;
+  imageBase64?: string;
+  mimeType?: string;
+}
+
 export interface PreparedTurn {
   userText: string;
-  imageParts: Array<{ imageUrl: string; mimeType?: string }>;
+  imageParts: ChatImagePart[];
   ragContext: RagContext;
   llmParts: LlmInputPart[];
 }
@@ -198,7 +204,8 @@ export class ChatService {
       { type: 'text', text: this.buildPrompt(history, userText, ragContext) },
       ...imageParts.map((p) => ({
         type: 'image' as const,
-        imageUrl: p.imageUrl,
+        ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
+        ...(p.imageBase64 ? { imageBase64: p.imageBase64 } : {}),
         ...(p.mimeType ? { mimeType: p.mimeType } : {}),
       })),
     ];
@@ -240,7 +247,7 @@ export class ChatService {
           args.sessionId,
           turnId,
           args.userText,
-          JSON.stringify(args.parts),
+          JSON.stringify(this.redactPersistedParts(args.parts)),
           args.occurredAt,
           nextSeq++,
         );
@@ -295,18 +302,28 @@ export class ChatService {
       .trim();
   }
 
-  private extractImageParts(
-    parts: InputPartDto[],
-  ): Array<{ imageUrl: string; mimeType?: string }> {
-    const out: Array<{ imageUrl: string; mimeType?: string }> = [];
+  private extractImageParts(parts: InputPartDto[]): ChatImagePart[] {
+    const out: ChatImagePart[] = [];
     for (const p of parts) {
       if (p.type !== 'image') continue;
-      if (!p.imageUrl) {
+      if (p.imageId) {
         throw new BadRequestException(
-          'image parts must include imageUrl (imageId resolution is not yet supported)',
+          'imageId resolution is not yet supported; send imageUrl or imageBase64',
         );
       }
-      out.push({ imageUrl: p.imageUrl, mimeType: p.mimeType });
+
+      const sourceCount = (p.imageUrl ? 1 : 0) + (p.imageBase64 ? 1 : 0);
+      if (sourceCount !== 1) {
+        throw new BadRequestException(
+          'image parts must include exactly one of imageUrl or imageBase64',
+        );
+      }
+
+      out.push({
+        ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
+        ...(p.imageBase64 ? { imageBase64: p.imageBase64 } : {}),
+        ...(p.mimeType ? { mimeType: p.mimeType } : {}),
+      });
     }
     return out;
   }
@@ -319,6 +336,8 @@ export class ChatService {
           return text ? { type: 'text' as const, text } : null;
         }
 
+        if (!part.imageUrl && !part.imageId) return null;
+
         return {
           type: 'image' as const,
           ...(part.imageUrl ? { imageUrl: part.imageUrl } : {}),
@@ -327,6 +346,16 @@ export class ChatService {
         };
       })
       .filter((part): part is RagInputPart => Boolean(part));
+  }
+
+  private redactPersistedParts(parts: InputPartDto[]): InputPartDto[] {
+    return parts.map((part) => {
+      if (part.type !== 'image' || !part.imageBase64) return part;
+      return {
+        ...part,
+        imageBase64: '[redacted]',
+      };
+    });
   }
 
   private buildPrompt(

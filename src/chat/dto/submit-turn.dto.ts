@@ -37,6 +37,10 @@ export class InputPartDto {
 
   @IsOptional()
   @IsString()
+  imageBase64?: string;
+
+  @IsOptional()
+  @IsString()
   mimeType?: string;
 }
 
