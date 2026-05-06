@@ -66,12 +66,21 @@ class OptionsDto {
   includeDiagnostics?: boolean;
 
   /**
-   * Request upstream `thinking` events from the Model Host. Defaults to
-   * `true` on the streaming endpoint.
+   * Allows upstream `thinking` events when the orchestrator's turn planner
+   * decides the turn is complex enough. Use `forceThinking` to override.
    */
   @IsOptional()
   @IsBoolean()
   thinking?: boolean;
+
+  /**
+   * Explicitly force upstream `thinking` events. This is separate from the
+   * legacy `thinking` boolean so older clients that always send
+   * `thinking: true` still get automatic planner behavior.
+   */
+  @IsOptional()
+  @IsBoolean()
+  forceThinking?: boolean;
 }
 
 export class SubmitTurnDto {

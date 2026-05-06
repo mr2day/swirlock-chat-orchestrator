@@ -21,6 +21,9 @@ export interface ContextMemoryFragment {
 
 export interface TurnPlan {
   shouldRetrieve: boolean;
+  shouldThink: boolean;
+  includeMemoryInPrompt: boolean;
+  includeRecentConversationInPrompt: boolean;
   resolvedQueryText: string;
   intent: string;
   freshness: RagFreshness;
@@ -67,9 +70,14 @@ export class TurnPlannerService {
     const shouldRetrieve = this.shouldRetrieve(userText, resolvedQueryText);
     const freshness = this.pickFreshness(userText, input.defaultFreshness);
     const intent = this.pickIntent(userText, resolvedQueryText, activeSubject);
+    const isSimpleConversationalTurn =
+      !shouldRetrieve && GREETING_OR_ACKNOWLEDGEMENT.test(userText);
 
     return {
       shouldRetrieve,
+      shouldThink: this.shouldThink(userText, shouldRetrieve, intent),
+      includeMemoryInPrompt: !isSimpleConversationalTurn,
+      includeRecentConversationInPrompt: !isSimpleConversationalTurn,
       resolvedQueryText,
       intent,
       freshness,
@@ -92,6 +100,32 @@ export class TurnPlannerService {
     if (QUESTION_START.test(normalized)) return true;
 
     return resolvedQueryText !== normalized && resolvedQueryText.length > 0;
+  }
+
+  private shouldThink(
+    userText: string,
+    shouldRetrieve: boolean,
+    intent: string,
+  ): boolean {
+    if (GREETING_OR_ACKNOWLEDGEMENT.test(userText.trim())) return false;
+    if (intent === 'current-weather' || intent === 'market-price') return false;
+    if (/^who (was|is)\b/i.test(userText.trim())) return false;
+
+    const reasoningSignals = [
+      /\b(analyze|compare|evaluate|debug|diagnose|design|architect|strategy|plan|trade[- ]offs?)\b/i,
+      /\b(explain why|why does|how should|best approach|step by step|reason through)\b/i,
+      /\b(calculate|derive|prove|estimate|optimize)\b/i,
+    ];
+
+    if (reasoningSignals.some((pattern) => pattern.test(userText))) {
+      return true;
+    }
+
+    const questionMarks = userText.match(/\?/g)?.length ?? 0;
+    if (questionMarks > 1) return true;
+    if (userText.length > 280) return true;
+
+    return shouldRetrieve && /\b(why|how|should|would|could)\b/i.test(userText);
   }
 
   private resolveQueryText(

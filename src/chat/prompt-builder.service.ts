@@ -25,9 +25,13 @@ export class PromptBuilderService {
       `Resolved retrieval query: ${input.turnPlan.resolvedQueryText || '(none)'}`,
     ];
 
-    this.appendMemory(lines, input.turnPlan.memoryFragments);
+    if (input.turnPlan.includeMemoryInPrompt) {
+      this.appendMemory(lines, input.turnPlan.memoryFragments);
+    }
     this.appendEvidence(lines, input.ragContext);
-    this.appendConversation(lines, input.history);
+    if (input.turnPlan.includeRecentConversationInPrompt) {
+      this.appendConversation(lines, input.history);
+    }
 
     lines.push(
       '',

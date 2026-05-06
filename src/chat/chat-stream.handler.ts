@@ -150,7 +150,6 @@ export class ChatStreamHandler {
 
     send({ type: 'accepted', meta: meta() });
 
-    const wantThinking = dto.options?.thinking !== false;
     const abort = new AbortController();
     ws.once('close', () => abort.abort());
 
@@ -174,6 +173,10 @@ export class ChatStreamHandler {
 
     let assistantText = '';
     let finishReason: 'stop' | 'length' | 'error' = 'stop';
+    const wantThinking = this.resolveThinkingRequest(
+      dto,
+      prepared.turnPlan.shouldThink,
+    );
 
     try {
       const result = await this.llm.streamInfer({
@@ -357,5 +360,14 @@ export class ChatStreamHandler {
       default:
         return status >= 500 ? 'internal_error' : 'bad_request';
     }
+  }
+
+  private resolveThinkingRequest(
+    dto: SubmitTurnDto,
+    plannerWantsThinking: boolean,
+  ): boolean {
+    if (dto.options?.forceThinking === true) return true;
+    if (dto.options?.thinking === false) return false;
+    return plannerWantsThinking;
   }
 }

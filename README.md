@@ -102,7 +102,7 @@ ws.onopen = () => {
         parts: [{ type: 'text', text: 'Tell me a short joke.' }],
         occurredAt: new Date().toISOString()
       },
-      options: { thinking: true }
+      options: { forceThinking: true }
     }
   }));
 };

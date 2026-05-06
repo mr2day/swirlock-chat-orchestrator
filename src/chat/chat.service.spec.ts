@@ -117,7 +117,18 @@ function makeService(history: TestMessageRow[] = []) {
 
 describe('ChatService turn planning', () => {
   it('does not call RAG for a greeting', async () => {
-    const { service, retrieve } = makeService();
+    const { service, retrieve } = makeService([
+      {
+        id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
+        session_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
+        turn_id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
+        role: 'assistant',
+        content: 'Louis Malle was a French film director.',
+        parts_json: null,
+        created_at: '2026-05-06T07:00:10.000Z',
+        seq: 1,
+      },
+    ]);
 
     const prepared = await service.prepareTurn({
       sessionId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567890',
@@ -129,12 +140,15 @@ describe('ChatService turn planning', () => {
     expect(retrieve).not.toHaveBeenCalled();
     expect(prepared.ragContext.retrievalMode).toBe('none');
     expect(prepared.turnPlan.shouldRetrieve).toBe(false);
+    expect(prepared.turnPlan.shouldThink).toBe(false);
     const promptPart = prepared.llmParts[0];
     expect(promptPart?.type).toBe('text');
     if (promptPart?.type !== 'text') {
       throw new Error('Expected first LLM part to be text.');
     }
     expect(promptPart.text).toContain('does not need retrieval');
+    expect(promptPart.text).not.toContain('Louis Malle');
+    expect(promptPart.text).not.toContain('Recent conversation:');
   });
 
   it('resolves elliptical follow-up questions before calling RAG', async () => {
