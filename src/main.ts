@@ -26,6 +26,22 @@ async function bootstrap(): Promise<void> {
   const cfg = app.get<ServiceConfig>(SERVICE_CONFIG);
   const streamHandler = app.get(ChatStreamHandler);
 
+  const corsOrigins = cfg.http?.corsOrigins ?? [];
+  if (corsOrigins.length > 0) {
+    app.enableCors({
+      origin: corsOrigins,
+      methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Authorization', 'Content-Type', 'x-correlation-id'],
+      exposedHeaders: ['x-correlation-id'],
+      credentials: false,
+      maxAge: 600,
+    });
+    Logger.log(
+      `CORS enabled for ${corsOrigins.length} origin(s): ${corsOrigins.join(', ')}`,
+      'Bootstrap',
+    );
+  }
+
   await app.listen(cfg.port, cfg.host);
 
   attachStreamServer(app.getHttpServer() as HttpServer, cfg, streamHandler);

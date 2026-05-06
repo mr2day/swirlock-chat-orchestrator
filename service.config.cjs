@@ -24,6 +24,17 @@ const env = {
   // API version surfaced in `meta.apiVersion` of every response.
   apiVersion: 'v2',
 
+  // CORS origins allowed for browser clients (e.g. the swirlock-chatbot-ui
+  // dev server on http://localhost:4200). Empty array disables CORS entirely
+  // and the orchestrator stays open only to same-origin / non-browser callers.
+  // Production deployments should narrow this list to the deployed UI URL(s).
+  http: {
+    corsOrigins: [
+      'http://localhost:4200',
+      'http://127.0.0.1:4200',
+    ],
+  },
+
   // Single hardcoded dev user.
   // Replace `bearerToken` with a real secret from a private store before
   // exposing this service outside localhost. The contract surface is designed

@@ -27,6 +27,15 @@ export interface RagConfig {
   synthesisMode: 'none' | 'brief' | 'detailed';
 }
 
+export interface HttpConfig {
+  /**
+   * Origins allowed by CORS preflight. The browser blocks cross-origin
+   * `fetch` to the orchestrator unless its `Origin` header matches one of
+   * these entries. Empty list disables CORS entirely.
+   */
+  corsOrigins: string[];
+}
+
 export interface ServiceConfig {
   serviceName: string;
   host: string;
@@ -36,6 +45,7 @@ export interface ServiceConfig {
   database: DatabaseConfig;
   llmHost: LlmHostConfig;
   rag: RagConfig;
+  http?: HttpConfig;
 }
 
 export const SERVICE_CONFIG = Symbol('SERVICE_CONFIG');
@@ -91,4 +101,15 @@ function validate(c: ServiceConfig): void {
     'rag.synthesisMode invalid',
   );
   must(!rag.enabled || rag.baseUrl, 'rag.baseUrl required when enabled');
+
+  if (c.http !== undefined) {
+    must(
+      Array.isArray(c.http.corsOrigins),
+      'http.corsOrigins must be an array of origin strings',
+    );
+    must(
+      c.http.corsOrigins.every((o) => typeof o === 'string' && o.length > 0),
+      'http.corsOrigins entries must be non-empty strings',
+    );
+  }
 }
