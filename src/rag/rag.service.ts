@@ -150,7 +150,7 @@ export class RagService {
       ws.on('message', (raw: WebSocket.RawData) => {
         let event: RetrievalStreamEvent;
         try {
-          const parsed = JSON.parse(rawToString(raw));
+          const parsed: unknown = JSON.parse(rawToString(raw));
           if (!this.isRetrievalStreamEvent(parsed)) {
             this.log.warn('RAG Engine emitted a malformed stream event');
             return;
@@ -172,9 +172,7 @@ export class RagService {
         }
 
         if (event.type === 'retrieval.completed') {
-          const data = isRecord(event.data)
-            ? event.data.retrieval
-            : undefined;
+          const data = isRecord(event.data) ? event.data.retrieval : undefined;
           settle(() => resolve(this.mapRetrievedContext(data)));
         } else if (event.type === 'retrieval.failed') {
           const message =
@@ -256,7 +254,9 @@ export class RagService {
     return 'none';
   }
 
-  private isRetrievalStreamEvent(value: unknown): value is RetrievalStreamEvent {
+  private isRetrievalStreamEvent(
+    value: unknown,
+  ): value is RetrievalStreamEvent {
     return (
       isRecord(value) &&
       typeof value.type === 'string' &&
@@ -268,8 +268,8 @@ export class RagService {
 
   private streamUrl(): string {
     return (
-      this.cfg.rag.baseUrl!
-        .replace(/^http:/i, 'ws:')
+      this.cfg.rag
+        .baseUrl!.replace(/^http:/i, 'ws:')
         .replace(/^https:/i, 'wss:')
         .replace(/\/$/, '') + '/v2/retrieval/evidence/stream'
     );
