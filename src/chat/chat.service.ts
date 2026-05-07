@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
@@ -11,6 +12,7 @@ import type { ServiceConfig } from '../config/config';
 import { buildMeta } from '../common/meta.util';
 import { DatabaseService } from '../database/database.service';
 import type { LlmInputPart } from '../llm-host/llm-host.service';
+import type { LlmMessage } from '../llm-host/llm-host.service';
 import { RagService } from '../rag/rag.service';
 import type {
   RagContext,
@@ -19,6 +21,8 @@ import type {
 } from '../rag/rag.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import type { InputPartDto, SubmitTurnDto } from './dto/submit-turn.dto';
+import { PersonaIdentityService } from './persona-identity.service';
+import type { PersonaIdentityCapsule } from './persona-identity.service';
 import { PromptBuilderService } from './prompt-builder.service';
 import type { ContextMemoryFragment, TurnPlan } from './turn-planner.service';
 import { TurnPlannerService } from './turn-planner.service';
@@ -55,9 +59,11 @@ interface ChatImagePart {
 export interface PreparedTurn {
   userText: string;
   imageParts: ChatImagePart[];
+  identity: PersonaIdentityCapsule;
   turnPlan: TurnPlan;
   memoryFragments: ContextMemoryFragment[];
   ragContext: RagContext;
+  llmMessages: LlmMessage[];
   llmParts: LlmInputPart[];
 }
 
@@ -70,9 +76,12 @@ export interface PersistedTurn {
 
 @Injectable()
 export class ChatService {
+  private readonly log = new Logger(ChatService.name);
+
   constructor(
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly db: DatabaseService,
+    private readonly personaIdentity: PersonaIdentityService,
     private readonly rag: RagService,
     private readonly turnPlanner: TurnPlannerService,
     private readonly promptBuilder: PromptBuilderService,
@@ -181,7 +190,7 @@ export class ChatService {
     abortSignal?: AbortSignal;
   }): Promise<PreparedTurn> {
     const { sessionId, dto, correlationId, authUserId } = args;
-    this.loadSession(sessionId, authUserId);
+    const session = this.loadSession(sessionId, authUserId);
 
     const userText = this.extractUserText(dto.message.parts);
     if (!userText) {
@@ -223,31 +232,35 @@ export class ChatService {
         })
       : this.emptyRagContext();
 
-    const llmParts: LlmInputPart[] = [
-      {
-        type: 'text',
-        text: this.promptBuilder.build({
-          history,
-          userText,
-          occurredAt: dto.message.occurredAt,
-          turnPlan,
-          ragContext,
-        }),
-      },
-      ...imageParts.map((p) => ({
-        type: 'image' as const,
-        ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
-        ...(p.imageBase64 ? { imageBase64: p.imageBase64 } : {}),
-        ...(p.mimeType ? { mimeType: p.mimeType } : {}),
-      })),
-    ];
+    const identity = this.personaIdentity.prepareCapsule({
+      personaId: session.persona_id,
+      userId: session.user_id,
+      sessionId,
+      occurredAt: dto.message.occurredAt,
+    });
+    const llmMessages = this.promptBuilder.buildMessages({
+      history,
+      userText,
+      occurredAt: dto.message.occurredAt,
+      turnPlan,
+      ragContext,
+      identity,
+    });
+    const llmParts: LlmInputPart[] = imageParts.map((p) => ({
+      type: 'image' as const,
+      ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
+      ...(p.imageBase64 ? { imageBase64: p.imageBase64 } : {}),
+      ...(p.mimeType ? { mimeType: p.mimeType } : {}),
+    }));
 
     return {
       userText,
       imageParts,
+      identity,
       turnPlan,
       memoryFragments: turnPlan.memoryFragments,
       ragContext,
+      llmMessages,
       llmParts,
     };
   }
@@ -308,6 +321,20 @@ export class ChatService {
         .run(createdAt, args.sessionId);
     });
     tx();
+
+    try {
+      this.personaIdentity.recordTurnExperience({
+        sessionId: args.sessionId,
+        turnId,
+        userText: args.userText,
+        assistantText: args.assistantText,
+        occurredAt: createdAt,
+      });
+    } catch (err) {
+      this.log.warn(
+        `Persona identity experience recording failed: ${(err as Error).message}`,
+      );
+    }
 
     return { turnId, userMessageId, assistantMessageId, createdAt };
   }

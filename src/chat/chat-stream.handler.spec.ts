@@ -42,6 +42,14 @@ const CONFIG: ServiceConfig = {
 const SIMPLE_PREPARED_TURN: PreparedTurn = {
   userText: 'hello',
   imageParts: [],
+  identity: {
+    personaId: 'gigi-the-robot',
+    displayName: 'Gigi the Robot',
+    identityVersion: 1,
+    coreMessage: 'Core persona identity:\nYou are Gigi the Robot.',
+    factCount: 1,
+    reflectionCount: 0,
+  },
   turnPlan: {
     route: 'final_answer',
     shouldRetrieve: false,
@@ -62,7 +70,14 @@ const SIMPLE_PREPARED_TURN: PreparedTurn = {
     retrievalMode: 'none',
     evidence: [],
   },
-  llmParts: [{ type: 'text', text: 'Current user message:\nhello' }],
+  llmMessages: [
+    {
+      role: 'system',
+      content: 'Core persona identity:\nYou are Gigi the Robot.',
+    },
+    { role: 'user', content: 'hello' },
+  ],
+  llmParts: [],
 };
 
 class FakeWebSocket extends EventEmitter {

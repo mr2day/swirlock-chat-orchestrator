@@ -4,6 +4,7 @@ import { LlmHostModule } from '../llm-host/llm-host.module';
 import { RagModule } from '../rag/rag.module';
 import { ChatService } from './chat.service';
 import { ChatStreamHandler } from './chat-stream.handler';
+import { PersonaIdentityService } from './persona-identity.service';
 import { PromptBuilderService } from './prompt-builder.service';
 import { TurnPlannerService } from './turn-planner.service';
 import { UtilityTurnClassifierService } from './utility-turn-classifier.service';
@@ -13,6 +14,7 @@ import { UtilityTurnClassifierService } from './utility-turn-classifier.service'
   providers: [
     ChatService,
     ChatStreamHandler,
+    PersonaIdentityService,
     TurnPlannerService,
     UtilityTurnClassifierService,
     PromptBuilderService,

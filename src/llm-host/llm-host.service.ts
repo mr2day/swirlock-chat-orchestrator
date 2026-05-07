@@ -26,6 +26,11 @@ export type LlmInputPart =
       mimeType?: string;
     };
 
+export interface LlmMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
 export interface LlmInferOptions {
   responseFormat?: 'text' | 'json';
   thinking?: boolean;
@@ -105,7 +110,8 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
    */
   async streamInfer(args: {
     correlationId: string;
-    parts: LlmInputPart[];
+    parts?: LlmInputPart[];
+    messages?: LlmMessage[];
     options?: LlmInferOptions;
     baseUrl?: string;
     callerService?: string;
@@ -131,14 +137,18 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
   }
 
   private buildInferRequest(args: {
-    parts: LlmInputPart[];
+    parts?: LlmInputPart[];
+    messages?: LlmMessage[];
     options?: LlmInferOptions;
     callerService?: string;
     priority?: number;
   }) {
     return {
       requestContext: this.buildRequestContext(args),
-      input: { parts: args.parts },
+      input: {
+        ...(args.messages ? { messages: args.messages } : {}),
+        ...(args.parts ? { parts: args.parts } : {}),
+      },
       ...(args.options ? { options: args.options } : {}),
     };
   }
@@ -191,7 +201,7 @@ interface ModelHostInferRequest {
     priority?: number;
     requestedAt: string;
   };
-  input: { parts: LlmInputPart[] };
+  input: { parts?: LlmInputPart[]; messages?: LlmMessage[] };
   options?: LlmInferOptions;
 }
 

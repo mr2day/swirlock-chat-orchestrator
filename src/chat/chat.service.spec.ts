@@ -5,6 +5,7 @@ import type { ServiceConfig } from '../config/config';
 import type { DatabaseService } from '../database/database.service';
 import type { RagContext, RagService } from '../rag/rag.service';
 import type { SubmitTurnDto } from './dto/submit-turn.dto';
+import type { PersonaIdentityService } from './persona-identity.service';
 import type { UtilityTurnDecision } from './turn-classification';
 import type { UtilityTurnClassifierService } from './utility-turn-classifier.service';
 
@@ -23,6 +24,16 @@ const EMPTY_RAG: RagContext = {
   retrievalUsed: false,
   retrievalMode: 'none',
   evidence: [],
+};
+
+const TEST_IDENTITY = {
+  personaId: 'gigi-the-robot',
+  displayName: 'Gigi the Robot',
+  identityVersion: 1,
+  coreMessage:
+    'Core persona identity:\nYou are Gigi the Robot.\nIf asked your name, say your name is Gigi the Robot.',
+  factCount: 1,
+  reflectionCount: 0,
 };
 
 const CONFIG: ServiceConfig = {
@@ -135,12 +146,17 @@ function makeService(
     .fn()
     .mockResolvedValue(EMPTY_RAG);
   const rag = { retrieve } as unknown as RagService;
+  const personaIdentity = {
+    prepareCapsule: jest.fn().mockReturnValue(TEST_IDENTITY),
+    recordTurnExperience: jest.fn(),
+  } as unknown as PersonaIdentityService;
   const classifier = {
     classify: jest.fn().mockResolvedValue(decision),
   } as unknown as UtilityTurnClassifierService;
   const service = new ChatService(
     CONFIG,
     db,
+    personaIdentity,
     rag,
     new TurnPlannerService(classifier),
     new PromptBuilderService(),
@@ -185,12 +201,17 @@ describe('ChatService turn planning', () => {
     expect(prepared.ragContext.retrievalMode).toBe('none');
     expect(prepared.turnPlan.shouldRetrieve).toBe(false);
     expect(prepared.turnPlan.shouldThink).toBe(false);
-    expect(prepared.llmParts[0]?.type).toBe('text');
-    const prompt =
-      prepared.llmParts[0]?.type === 'text' ? prepared.llmParts[0].text : '';
-    expect(prompt).toContain('Current user message:\nhow are you today?');
-    expect(prompt).not.toContain('Conversation memory:');
-    expect(prompt).not.toContain('Recent conversation:');
+    expect(prepared.llmMessages[0]?.role).toBe('system');
+    expect(prepared.llmMessages[0]?.content).toContain('Gigi the Robot');
+    const turnContext = prepared.llmMessages.find((message) =>
+      message.content.includes('Operational context for this turn:'),
+    );
+    expect(turnContext?.content).not.toContain('Conversation memory:');
+    expect(turnContext?.content).not.toContain('Recent conversation:');
+    expect(prepared.llmMessages[prepared.llmMessages.length - 1]).toEqual({
+      role: 'user',
+      content: 'how are you today?',
+    });
   });
 
   it('resolves elliptical follow-up questions before calling RAG', async () => {

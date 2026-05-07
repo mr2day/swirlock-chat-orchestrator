@@ -278,7 +278,8 @@ export class ChatStreamHandler {
     try {
       const result = await this.llm.streamInfer({
         correlationId,
-        parts: prepared.llmParts,
+        messages: prepared.llmMessages,
+        ...(prepared.llmParts.length > 0 ? { parts: prepared.llmParts } : {}),
         options: { thinking: wantThinking },
         abortSignal: abort.signal,
         onEvent: (evt) => {

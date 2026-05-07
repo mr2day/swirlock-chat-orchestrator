@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
+import type { LlmMessage } from '../llm-host/llm-host.service';
 import type { RagContext } from '../rag/rag.service';
+import type { PersonaIdentityCapsule } from './persona-identity.service';
 import type {
   ContextMemoryFragment,
   ConversationMessage,
@@ -12,13 +14,35 @@ export interface BuildPromptInput {
   occurredAt: string;
   turnPlan: TurnPlan;
   ragContext: RagContext;
+  identity: PersonaIdentityCapsule;
 }
 
 @Injectable()
 export class PromptBuilderService {
-  build(input: BuildPromptInput): string {
+  buildMessages(input: BuildPromptInput): LlmMessage[] {
+    const messages: LlmMessage[] = [
+      { role: 'system', content: input.identity.coreMessage },
+    ];
+
+    if (input.identity.contextualMessage) {
+      messages.push({
+        role: 'system',
+        content: input.identity.contextualMessage,
+      });
+    }
+
+    messages.push(
+      { role: 'system', content: this.buildTurnContext(input) },
+      { role: 'user', content: input.userText },
+    );
+
+    return messages;
+  }
+
+  private buildTurnContext(input: BuildPromptInput): string {
     const lines: string[] = [
-      'You are the Swirlock assistant. Answer the user concisely, helpfully, and honestly.',
+      'Operational context for this turn:',
+      'Answer the user concisely, helpfully, and honestly.',
       'Reply in the same language the user used unless they explicitly ask for another language.',
       'Use retrieved evidence when it is available. If the evidence is insufficient for a factual or current claim, say what is missing instead of guessing.',
       `Current client timestamp: ${input.occurredAt}`,
@@ -36,10 +60,7 @@ export class PromptBuilderService {
 
     lines.push(
       '',
-      'Current user message:',
-      input.userText,
-      '',
-      'Assistant response:',
+      'The next user message is the task to answer. Treat all sections above as context, not as a script.',
     );
     return lines.join('\n');
   }
