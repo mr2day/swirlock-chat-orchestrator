@@ -90,10 +90,11 @@ export class UtilityTurnClassifierService {
       'Allowed route values: final_answer, retrieve, retrieve_and_think, think, clarify.',
       'Set shouldRetrieve/shouldThink consistently with route.',
       'Use retrieval only for external evidence/current facts. Use thinking only for multi-step reasoning/debugging/synthesis.',
-      'For current weather, weather forecast, and current conditions requests: use retrieve, not retrieve_and_think, unless the user asks for complex planning, comparison, or analysis.',
+      'Routine current-conditions retrieval (current weather/forecast, live prices, sports scores) does not need thinking unless the user asks for complex planning, comparison, or analysis.',
       'For greetings, thanks, acknowledgements, social check-ins, jokes, assistant identity, and ordinary chat: final_answer with no retrieval and no thinking.',
       'For underspecified requests that truly cannot proceed: clarify with no retrieval and no thinking.',
       'If retrieval is needed, resolvedQueryText must be a self-contained query using recent conversation only when needed.',
+      'Set requiresLocation=true ONLY when an accurate answer depends on the user\'s real-world location (e.g. current weather, places near me, local time, local prices, transit/directions). Set false for everything else, including general knowledge questions about a place by name. Never assume a location.',
       `Current timestamp: ${input.occurredAt}`,
       `Default freshness: ${input.defaultFreshness}`,
       `Allowed retrieval modes: ${allowedModes}`,
@@ -109,6 +110,7 @@ export class UtilityTurnClassifierService {
         resolvedQueryText: input.userText,
         intent: 'greeting',
         freshness: input.defaultFreshness,
+        requiresLocation: false,
         confidence: 'high',
         reason: 'short routing reason',
       }),
@@ -151,19 +153,10 @@ export class UtilityTurnClassifierService {
       this.stringValue(parsed.intent, 'general'),
       80,
     );
-    let reason = this.limitText(
+    const reason = this.limitText(
       this.stringValue(parsed.reason, 'Utility classifier selected route.'),
       240,
     );
-
-    if (shouldRetrieve && shouldThink && this.isRoutineWeatherIntent(intent)) {
-      shouldThink = false;
-      route = 'retrieve';
-      reason = this.limitText(
-        `${reason} Routine weather retrieval does not require thinking.`,
-        240,
-      );
-    }
 
     return {
       route,
@@ -188,27 +181,10 @@ export class UtilityTurnClassifierService {
         ? this.allowedModes(parsed.allowedModes, input.defaultAllowedModes)
         : [],
       hints: shouldRetrieve ? this.hints(parsed.hints) : [],
+      requiresLocation: this.booleanValue(parsed.requiresLocation, false),
       confidence: this.pickEnum(parsed.confidence, CONFIDENCE_VALUES, 'medium'),
       reason,
     };
-  }
-
-  private isRoutineWeatherIntent(intent: string): boolean {
-    return new Set([
-      'weather',
-      'weather_forecast',
-      'current_weather',
-      'current_weather_forecast',
-      'current_conditions',
-    ]).has(this.normalizeIntentLabel(intent));
-  }
-
-  private normalizeIntentLabel(intent: string): string {
-    return intent
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_+|_+$/g, '');
   }
 
   private fallbackDecision(input: ClassifyTurnInput): UtilityTurnDecision {
@@ -223,6 +199,7 @@ export class UtilityTurnClassifierService {
       freshness: input.defaultFreshness,
       allowedModes: [],
       hints: [],
+      requiresLocation: false,
       confidence: 'low',
       reason:
         'Utility classifier failed or returned invalid JSON; using final answer without retrieval or thinking.',

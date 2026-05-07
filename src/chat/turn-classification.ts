@@ -20,6 +20,7 @@ export interface UtilityTurnDecision {
   freshness: RagFreshness;
   allowedModes: RagAllowedMode[];
   hints: RagHint[];
+  requiresLocation: boolean;
   confidence: TurnDecisionConfidence;
   reason: string;
 }

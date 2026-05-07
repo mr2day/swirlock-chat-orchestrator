@@ -18,6 +18,7 @@ import type {
   RagContext,
   RagInputPart,
   RetrievalStreamEvent,
+  UserLocation,
 } from '../rag/rag.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import type { InputPartDto, SubmitTurnDto } from './dto/submit-turn.dto';
@@ -186,6 +187,8 @@ export class ChatService {
     dto: SubmitTurnDto;
     correlationId: string;
     authUserId: string;
+    userLocation?: UserLocation;
+    resolveUserLocation?: () => Promise<UserLocation | null>;
     onRagStreamEvent?: (event: RetrievalStreamEvent) => void;
     abortSignal?: AbortSignal;
   }): Promise<PreparedTurn> {
@@ -216,6 +219,15 @@ export class ChatService {
       defaultAllowedModes: [...this.cfg.rag.allowedModes],
       abortSignal: args.abortSignal,
     });
+
+    let userLocation: UserLocation | undefined = args.userLocation;
+    if (!userLocation && turnPlan.requiresLocation && args.resolveUserLocation) {
+      const resolved = await args.resolveUserLocation();
+      if (resolved) {
+        userLocation = resolved;
+      }
+    }
+
     const ragContext = turnPlan.shouldRetrieve
       ? await this.rag.retrieve({
           correlationId,
@@ -227,6 +239,7 @@ export class ChatService {
           hints: turnPlan.hints,
           freshness: turnPlan.freshness,
           allowedModes: turnPlan.allowedModes,
+          ...(userLocation ? { userLocation } : {}),
           onStreamEvent: args.onRagStreamEvent,
           abortSignal: args.abortSignal,
         })
@@ -245,6 +258,7 @@ export class ChatService {
       turnPlan,
       ragContext,
       identity,
+      ...(userLocation ? { userLocation } : {}),
     });
     const llmParts: LlmInputPart[] = imageParts.map((p) => ({
       type: 'image' as const,

@@ -53,6 +53,13 @@ export interface RetrievalStreamEvent {
   data: Record<string, unknown>;
 }
 
+export interface UserLocation {
+  latitude: number;
+  longitude: number;
+  accuracyMeters?: number;
+  capturedAt?: string;
+}
+
 export interface RagInquiry {
   correlationId: string;
   sessionId: string;
@@ -63,6 +70,7 @@ export interface RagInquiry {
   hints?: RagHint[];
   freshness?: RagFreshness;
   allowedModes?: RagAllowedMode[];
+  userLocation?: UserLocation;
   onStreamEvent?: (event: RetrievalStreamEvent) => void;
   abortSignal?: AbortSignal;
 }
@@ -175,6 +183,9 @@ export class RagService implements OnModuleInit, OnModuleDestroy {
         freshness: inquiry.freshness ?? this.cfg.rag.freshness,
         allowedModes: inquiry.allowedModes ?? this.cfg.rag.allowedModes,
         maxEvidenceChunks: this.cfg.rag.maxEvidenceChunks,
+        ...(inquiry.userLocation
+          ? { userLocation: inquiry.userLocation }
+          : {}),
       },
     };
   }

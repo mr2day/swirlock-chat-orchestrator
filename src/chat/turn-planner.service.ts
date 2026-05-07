@@ -33,6 +33,7 @@ export interface TurnPlan {
   allowedModes: RagAllowedMode[];
   hints: RagHint[];
   memoryFragments: ContextMemoryFragment[];
+  requiresLocation: boolean;
   planReason: string;
 }
 
@@ -75,6 +76,7 @@ export class TurnPlannerService {
       allowedModes: decision.shouldRetrieve ? decision.allowedModes : [],
       hints: decision.shouldRetrieve ? decision.hints : [],
       memoryFragments,
+      requiresLocation: decision.requiresLocation,
       planReason: decision.reason,
     };
   }

@@ -6,9 +6,11 @@ import {
   IsIn,
   IsInt,
   IsISO8601,
+  IsNumber,
   IsOptional,
   IsString,
   IsUrl,
+  Max,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -84,6 +86,27 @@ class OptionsDto {
   forceThinking?: boolean;
 }
 
+export class UserLocationDto {
+  @IsNumber()
+  @Min(-90)
+  @Max(90)
+  latitude!: number;
+
+  @IsNumber()
+  @Min(-180)
+  @Max(180)
+  longitude!: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  accuracyMeters?: number;
+
+  @IsOptional()
+  @IsISO8601()
+  capturedAt?: string;
+}
+
 export class SubmitTurnDto {
   @ValidateNested()
   @Type(() => RequestContextDto)
@@ -96,6 +119,11 @@ export class SubmitTurnDto {
   @ValidateNested()
   @Type(() => MessageDto)
   message!: MessageDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UserLocationDto)
+  userLocation?: UserLocationDto;
 
   @IsOptional()
   @ValidateNested()

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { LlmMessage } from '../llm-host/llm-host.service';
-import type { RagContext } from '../rag/rag.service';
+import type { RagContext, UserLocation } from '../rag/rag.service';
 import type { PersonaIdentityCapsule } from './persona-identity.service';
 import type {
   ContextMemoryFragment,
@@ -15,6 +15,7 @@ export interface BuildPromptInput {
   turnPlan: TurnPlan;
   ragContext: RagContext;
   identity: PersonaIdentityCapsule;
+  userLocation?: UserLocation;
 }
 
 @Injectable()
@@ -52,6 +53,20 @@ export class PromptBuilderService {
       `Retrieval plan: ${input.turnPlan.planReason}`,
       `Resolved retrieval query: ${input.turnPlan.resolvedQueryText || '(none)'}`,
     ];
+
+    if (input.userLocation) {
+      const accuracy =
+        typeof input.userLocation.accuracyMeters === 'number'
+          ? `, accuracy ~${Math.round(input.userLocation.accuracyMeters)}m`
+          : '';
+      lines.push(
+        `User location (granted by the user, use only when the answer needs to be location-accurate): latitude ${input.userLocation.latitude}, longitude ${input.userLocation.longitude}${accuracy}.`,
+      );
+    } else if (input.turnPlan.requiresLocation) {
+      lines.push(
+        'User location: not available for this turn. Note that the answer cannot be location-accurate; explain this if relevant.',
+      );
+    }
 
     if (input.turnPlan.includeMemoryInPrompt) {
       this.appendMemory(lines, input.turnPlan.memoryFragments);

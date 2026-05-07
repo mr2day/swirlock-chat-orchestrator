@@ -12,6 +12,7 @@ import { SERVICE_CONFIG } from '../config/config';
 import type { ServiceConfig } from '../config/config';
 import { LlmHostService } from '../llm-host/llm-host.service';
 import type { RetrievalStreamEvent } from '../rag/rag.service';
+import type { UserLocation } from '../rag/rag.service';
 import { ChatService } from './chat.service';
 import type { PersistedTurn, PreparedTurn } from './chat.service';
 import { CreateSessionDto } from './dto/create-session.dto';
@@ -40,6 +41,13 @@ interface SubmittedTurn {
   dto: SubmitTurnDto;
 }
 
+interface PendingLocationRequest {
+  resolve: (location: UserLocation | null) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const LOCATION_REQUEST_TIMEOUT_MS = 60_000;
+
 function rawToString(raw: WebSocket.RawData): string {
   if (typeof raw === 'string') return raw;
   if (Buffer.isBuffer(raw)) return raw.toString('utf8');
@@ -64,6 +72,7 @@ export class ChatStreamHandler {
   async handle(ws: WebSocket, ctx: ConnectionContext): Promise<void> {
     let inFlightTurn = false;
     let activeTurnAbort: AbortController | null = null;
+    const pendingLocations = new Map<string, PendingLocationRequest>();
 
     ws.on('message', (raw: WebSocket.RawData) => {
       let envelope: V4Envelope;
@@ -93,6 +102,11 @@ export class ChatStreamHandler {
         return;
       }
 
+      if (envelope.type === 'turn.location_response') {
+        this.resolveLocationResponse(envelope, pendingLocations);
+        return;
+      }
+
       if (envelope.type === 'turn.submit') {
         if (inFlightTurn) {
           this.sendError(
@@ -118,9 +132,15 @@ export class ChatStreamHandler {
         }
 
         inFlightTurn = true;
-        void this.processTurn(ws, ctx, submitted, (abort) => {
-          activeTurnAbort = abort;
-        })
+        void this.processTurn(
+          ws,
+          ctx,
+          submitted,
+          (abort) => {
+            activeTurnAbort = abort;
+          },
+          pendingLocations,
+        )
           .catch((err: Error) => {
             this.log.error(`processTurn crashed: ${err.message}`, err.stack);
             this.sendError(ws, envelope.correlationId, 500, err.message);
@@ -128,6 +148,12 @@ export class ChatStreamHandler {
           .finally(() => {
             activeTurnAbort = null;
             inFlightTurn = false;
+            const pending = pendingLocations.get(submitted.correlationId);
+            if (pending) {
+              clearTimeout(pending.timer);
+              pendingLocations.delete(submitted.correlationId);
+              pending.resolve(null);
+            }
           });
         return;
       }
@@ -222,6 +248,7 @@ export class ChatStreamHandler {
     ctx: ConnectionContext,
     submitted: SubmittedTurn,
     setActiveAbort: (abort: AbortController) => void,
+    pendingLocations: Map<string, PendingLocationRequest>,
   ): Promise<void> {
     const { correlationId, dto, sessionId } = submitted;
     const send = (type: string, payload: unknown = {}): void =>
@@ -257,6 +284,27 @@ export class ChatStreamHandler {
         dto,
         correlationId,
         authUserId: ctx.authUserId,
+        ...(dto.userLocation
+          ? {
+              userLocation: {
+                latitude: dto.userLocation.latitude,
+                longitude: dto.userLocation.longitude,
+                ...(dto.userLocation.accuracyMeters !== undefined
+                  ? { accuracyMeters: dto.userLocation.accuracyMeters }
+                  : {}),
+                ...(dto.userLocation.capturedAt !== undefined
+                  ? { capturedAt: dto.userLocation.capturedAt }
+                  : {}),
+              },
+            }
+          : {}),
+        resolveUserLocation: () =>
+          this.requestLocationFromUi(
+            ws,
+            correlationId,
+            pendingLocations,
+            abort.signal,
+          ),
         abortSignal: abort.signal,
         onRagStreamEvent: (event: RetrievalStreamEvent) => {
           send('turn.retrieval', { event });
@@ -505,5 +553,121 @@ export class ChatStreamHandler {
     if (dto.options?.forceThinking === true) return true;
     if (dto.options?.thinking === false) return false;
     return plannerWantsThinking;
+  }
+
+  private async requestLocationFromUi(
+    ws: WebSocket,
+    correlationId: string,
+    pendingLocations: Map<string, PendingLocationRequest>,
+    abortSignal: AbortSignal,
+  ): Promise<UserLocation | null> {
+    if (abortSignal.aborted) return null;
+
+    const existing = pendingLocations.get(correlationId);
+    if (existing) {
+      clearTimeout(existing.timer);
+      pendingLocations.delete(correlationId);
+      existing.resolve(null);
+    }
+
+    return new Promise<UserLocation | null>((resolve) => {
+      const timer = setTimeout(() => {
+        pendingLocations.delete(correlationId);
+        resolve(null);
+      }, LOCATION_REQUEST_TIMEOUT_MS);
+
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        pendingLocations.delete(correlationId);
+        abortSignal.removeEventListener('abort', onAbort);
+        resolve(null);
+      };
+      abortSignal.addEventListener('abort', onAbort, { once: true });
+
+      pendingLocations.set(correlationId, {
+        resolve: (location) => {
+          clearTimeout(timer);
+          abortSignal.removeEventListener('abort', onAbort);
+          resolve(location);
+        },
+        timer,
+      });
+
+      this.send(ws, {
+        type: 'turn.location_required',
+        correlationId,
+        payload: {
+          requestedAt: new Date().toISOString(),
+          timeoutMs: LOCATION_REQUEST_TIMEOUT_MS,
+        },
+      });
+    });
+  }
+
+  private resolveLocationResponse(
+    envelope: V4Envelope,
+    pendingLocations: Map<string, PendingLocationRequest>,
+  ): void {
+    const pending = pendingLocations.get(envelope.correlationId);
+    if (!pending) return;
+
+    pendingLocations.delete(envelope.correlationId);
+
+    if (!isRecord(envelope.payload)) {
+      pending.resolve(null);
+      return;
+    }
+
+    const available = envelope.payload.available;
+    if (available !== true) {
+      pending.resolve(null);
+      return;
+    }
+
+    const location = isRecord(envelope.payload.location)
+      ? envelope.payload.location
+      : null;
+    if (!location) {
+      pending.resolve(null);
+      return;
+    }
+
+    const latitude = location.latitude;
+    const longitude = location.longitude;
+    if (
+      typeof latitude !== 'number' ||
+      !Number.isFinite(latitude) ||
+      latitude < -90 ||
+      latitude > 90
+    ) {
+      pending.resolve(null);
+      return;
+    }
+    if (
+      typeof longitude !== 'number' ||
+      !Number.isFinite(longitude) ||
+      longitude < -180 ||
+      longitude > 180
+    ) {
+      pending.resolve(null);
+      return;
+    }
+
+    const resolved: UserLocation = { latitude, longitude };
+    if (
+      typeof location.accuracyMeters === 'number' &&
+      Number.isFinite(location.accuracyMeters) &&
+      location.accuracyMeters >= 0
+    ) {
+      resolved.accuracyMeters = location.accuracyMeters;
+    }
+    if (
+      typeof location.capturedAt === 'string' &&
+      !Number.isNaN(Date.parse(location.capturedAt))
+    ) {
+      resolved.capturedAt = location.capturedAt;
+    }
+
+    pending.resolve(resolved);
   }
 }

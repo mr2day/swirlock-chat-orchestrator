@@ -154,24 +154,25 @@ describe('UtilityTurnClassifierService', () => {
     expect(decision.shouldThink).toBe(false);
   });
 
-  it('downgrades routine weather retrieval from retrieve_and_think to retrieve', async () => {
+  it('surfaces requiresLocation from the Utility LLM output', async () => {
     const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
       .fn()
       .mockResolvedValue({
         finishReason: 'stop',
         text: JSON.stringify({
-          route: 'retrieve_and_think',
+          route: 'retrieve',
           shouldRetrieve: true,
-          shouldThink: true,
-          resolvedQueryText: 'weather forecast Bucharest this evening rain',
-          intent: 'weather_forecast',
-          freshness: 'high',
+          shouldThink: false,
+          resolvedQueryText: 'current weather where the user is right now',
+          intent: 'current_weather',
+          freshness: 'realtime',
           allowedModes: ['local_rag', 'live_web'],
           hints: [],
           includeMemoryInPrompt: true,
           includeRecentConversationInPrompt: true,
+          requiresLocation: true,
           confidence: 'high',
-          reason: 'Needs current weather evidence.',
+          reason: 'Needs the user real-world location to answer accurately.',
         }),
       });
     const service = new UtilityTurnClassifierService(CONFIG, {
@@ -180,7 +181,7 @@ describe('UtilityTurnClassifierService', () => {
 
     const decision = await service.classify({
       correlationId: 'turn-weather',
-      userText: 'dar in bucuresti cum va fi vremea de acum si pana diseara?',
+      userText: 'what is the weather right now?',
       occurredAt: '2026-05-06T08:00:00.000Z',
       history: [],
       defaultFreshness: 'medium',
@@ -190,6 +191,43 @@ describe('UtilityTurnClassifierService', () => {
     expect(decision.route).toBe('retrieve');
     expect(decision.shouldRetrieve).toBe(true);
     expect(decision.shouldThink).toBe(false);
+    expect(decision.requiresLocation).toBe(true);
+  });
+
+  it('defaults requiresLocation to false when the Utility LLM omits it', async () => {
+    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
+      .fn()
+      .mockResolvedValue({
+        finishReason: 'stop',
+        text: JSON.stringify({
+          route: 'final_answer',
+          shouldRetrieve: false,
+          shouldThink: false,
+          resolvedQueryText: 'hi',
+          intent: 'greeting',
+          freshness: 'low',
+          allowedModes: [],
+          hints: [],
+          includeMemoryInPrompt: false,
+          includeRecentConversationInPrompt: false,
+          confidence: 'high',
+          reason: 'Greeting.',
+        }),
+      });
+    const service = new UtilityTurnClassifierService(CONFIG, {
+      streamInfer,
+    } as unknown as LlmHostService);
+
+    const decision = await service.classify({
+      correlationId: 'turn-greet',
+      userText: 'hi',
+      occurredAt: '2026-05-06T08:00:00.000Z',
+      history: [],
+      defaultFreshness: 'medium',
+      defaultAllowedModes: ['local_rag', 'live_web'],
+    });
+
+    expect(decision.requiresLocation).toBe(false);
   });
 
   it('routes non-English social turns to the final LLM without retrieval or thinking', async () => {
