@@ -274,6 +274,9 @@ export class ChatStreamHandler {
       dto,
       prepared.turnPlan.shouldThink,
     );
+    const preambleFilter = new AssistantPreambleFilter({
+      suppressLeadingGreeting: !isGreetingOnly(prepared.userText),
+    });
 
     try {
       const result = await this.llm.streamInfer({
@@ -293,15 +296,19 @@ export class ChatStreamHandler {
             case 'thinking':
               send('turn.thinking', evt.payload);
               break;
-            case 'chunk':
-              send('turn.chunk', evt.payload);
+            case 'chunk': {
+              const text = preambleFilter.acceptChunk(evt.payload.text);
+              if (text.length > 0) {
+                send('turn.chunk', { ...evt.payload, text });
+              }
               break;
+            }
             default:
               break;
           }
         },
       });
-      assistantText = result.text;
+      assistantText = preambleFilter.sanitizeFullText(result.text);
       finishReason = result.finishReason;
     } catch (err) {
       const status =
@@ -506,4 +513,79 @@ export class ChatStreamHandler {
     if (dto.options?.thinking === false) return false;
     return plannerWantsThinking;
   }
+}
+
+class AssistantPreambleFilter {
+  private buffer = '';
+  private decided = false;
+
+  constructor(
+    private readonly options: {
+      suppressLeadingGreeting: boolean;
+    },
+  ) {}
+
+  acceptChunk(text: string): string {
+    if (!this.options.suppressLeadingGreeting || this.decided) {
+      return text;
+    }
+
+    this.buffer += text;
+    const result = stripLeadingGreeting(this.buffer, false);
+
+    if (result.pending) {
+      return '';
+    }
+
+    this.decided = true;
+    this.buffer = '';
+    return result.text;
+  }
+
+  sanitizeFullText(text: string): string {
+    if (!this.options.suppressLeadingGreeting) {
+      return text;
+    }
+
+    return stripLeadingGreeting(text, true).text;
+  }
+}
+
+function stripLeadingGreeting(
+  text: string,
+  force: boolean,
+): { text: string; pending: boolean } {
+  let current = text;
+  let removed = false;
+
+  while (true) {
+    const next = current.replace(
+      /^\s*(salut|bun[aă]|hello|hi|hey)(?:\s*[,!.:;-]+\s*|\s+)/i,
+      '',
+    );
+    if (next === current) {
+      break;
+    }
+    current = next;
+    removed = true;
+  }
+
+  if (removed || force) {
+    return { text: current.trimStart(), pending: false };
+  }
+
+  const normalized = current.trimStart().toLowerCase();
+  const possibleGreetings = ['salut', 'buna', 'bună', 'hello', 'hi', 'hey'];
+  const couldBecomeGreeting =
+    normalized.length === 0 ||
+    possibleGreetings.some((greeting) => greeting.startsWith(normalized));
+
+  return {
+    text: current,
+    pending: couldBecomeGreeting,
+  };
+}
+
+function isGreetingOnly(value: string): boolean {
+  return /^(salut|buna|bună|hello|hi|hey)\b[!,. ]*$/i.test(value.trim());
 }

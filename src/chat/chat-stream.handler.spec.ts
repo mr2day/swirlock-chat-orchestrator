@@ -94,7 +94,7 @@ class FakeWebSocket extends EventEmitter {
   }
 }
 
-function submitTurnMessage(options: Record<string, unknown>) {
+function submitTurnMessage(options: Record<string, unknown>, text = 'hello') {
   return JSON.stringify({
     type: 'turn.submit',
     correlationId: 'turn-1',
@@ -107,7 +107,7 @@ function submitTurnMessage(options: Record<string, unknown>) {
           requestedAt: '2026-05-06T08:51:37.443Z',
         },
         message: {
-          parts: [{ type: 'text', text: 'hello' }],
+          parts: [{ type: 'text', text }],
           occurredAt: '2026-05-06T08:51:37.443Z',
         },
         options,
@@ -270,5 +270,71 @@ describe('ChatStreamHandler thinking routing', () => {
     expect(chat.persistTurn).toHaveBeenCalledTimes(2);
     expect(streamInfer).toHaveBeenCalledTimes(2);
     expect(ws.sent.length).toBeGreaterThan(sentAfterFirstTurn);
+  });
+
+  it('removes leading greetings from non-greeting streamed answers', async () => {
+    const chat = {
+      assertSessionOwnership: jest.fn(),
+      prepareTurn: jest.fn().mockResolvedValue({
+        ...SIMPLE_PREPARED_TURN,
+        userText: 'dar in bucuresti cum va fi vremea diseara?',
+      }),
+      persistTurn: jest.fn().mockReturnValue({
+        turnId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
+        userMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
+        assistantMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567802',
+        createdAt: '2026-05-06T08:51:40.000Z',
+      }),
+    } as unknown as ChatService;
+    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
+      .fn()
+      .mockImplementation(async (args) => {
+        args.onEvent?.({ type: 'started', payload: {} });
+        args.onEvent?.({ type: 'chunk', payload: { text: 'Sa' } });
+        args.onEvent?.({ type: 'chunk', payload: { text: 'lut! ' } });
+        args.onEvent?.({
+          type: 'chunk',
+          payload: { text: 'Conform datelor, nu ploua imediat.' },
+        });
+        return {
+          finishReason: 'stop',
+          text: 'Salut! Conform datelor, nu ploua imediat.',
+        };
+      });
+    const handler = new ChatStreamHandler(CONFIG, chat, {
+      streamInfer,
+    } as unknown as LlmHostService);
+    const ws = new FakeWebSocket();
+
+    const run = handler.handle(ws as unknown as WebSocket, {
+      authUserId: 'dev-user',
+      correlationId: 'turn-1',
+    });
+
+    ws.emit(
+      'message',
+      submitTurnMessage(
+        { includeDiagnostics: true },
+        'dar in bucuresti cum va fi vremea diseara?',
+      ),
+    );
+    await waitForSentEvent(ws, 'turn.done');
+    ws.close();
+    await run;
+
+    const chunks = ws.sent
+      .map(
+        (raw) =>
+          JSON.parse(raw) as { type: string; payload?: { text?: string } },
+      )
+      .filter((event) => event.type === 'turn.chunk')
+      .map((event) => event.payload?.text);
+
+    expect(chunks).toEqual(['Conform datelor, nu ploua imediat.']);
+    expect(chat.persistTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assistantText: 'Conform datelor, nu ploua imediat.',
+      }),
+    );
   });
 });
