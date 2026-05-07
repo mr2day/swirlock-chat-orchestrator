@@ -39,16 +39,30 @@ function makeTrace(): jest.Mocked<
 }
 
 describe('AgentLoopService', () => {
-  it('uses one model call when the agent emits a final answer immediately', async () => {
+  it('streams a normal final-answer infer message when the agent is ready to answer immediately', async () => {
+    const finalChunks: string[] = [];
     const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
       .fn()
-      .mockResolvedValue({
+      .mockResolvedValueOnce({
         finishReason: 'stop',
         text: JSON.stringify({
           mode: 'final',
-          content: 'Salut! Pot raspunde direct.',
+          content: 'Answer directly.',
         }),
-      });
+      })
+      .mockImplementationOnce(
+        (args: Parameters<LlmHostService['streamInfer']>[0]) => {
+          args.onEvent?.({ type: 'chunk', payload: { text: 'Salut! ' } });
+          args.onEvent?.({
+            type: 'chunk',
+            payload: { text: 'Pot raspunde direct.' },
+          });
+          return Promise.resolve({
+            finishReason: 'stop',
+            text: 'Salut! Pot raspunde direct.',
+          });
+        },
+      );
     const retrieve: jest.MockedFunction<RagService['retrieve']> = jest.fn();
     const trace = makeTrace();
     const service = new AgentLoopService(
@@ -64,10 +78,14 @@ describe('AgentLoopService', () => {
       prepared: PREPARED,
       occurredAt: '2026-05-08T12:00:00.000Z',
       initialThinking: false,
+      onFinalChunk: (text) => finalChunks.push(text),
     });
 
     expect(result.assistantText).toBe('Salut! Pot raspunde direct.');
-    expect(streamInfer).toHaveBeenCalledTimes(1);
+    expect(finalChunks).toEqual(['Salut! ', 'Pot raspunde direct.']);
+    expect(streamInfer).toHaveBeenCalledTimes(2);
+    expect(streamInfer.mock.calls[0]?.[0].options?.responseFormat).toBe('json');
+    expect(streamInfer.mock.calls[1]?.[0].options?.responseFormat).toBe('text');
     expect(retrieve).not.toHaveBeenCalled();
     expect(result.diagnostics.agentSteps).toBe(1);
   });
@@ -91,9 +109,21 @@ describe('AgentLoopService', () => {
         finishReason: 'stop',
         text: JSON.stringify({
           mode: 'final',
-          content: 'I searched and found one weather source.',
+          content: 'Answer with the retrieved weather source.',
         }),
-      });
+      })
+      .mockImplementationOnce(
+        (args: Parameters<LlmHostService['streamInfer']>[0]) => {
+          args.onEvent?.({
+            type: 'chunk',
+            payload: { text: 'I searched and found one weather source.' },
+          });
+          return Promise.resolve({
+            finishReason: 'stop',
+            text: 'I searched and found one weather source.',
+          });
+        },
+      );
     const retrieve: jest.MockedFunction<RagService['retrieve']> = jest
       .fn()
       .mockResolvedValue({
@@ -130,13 +160,21 @@ describe('AgentLoopService', () => {
         freshness: 'realtime',
       }),
     );
-    expect(streamInfer).toHaveBeenCalledTimes(2);
+    expect(streamInfer).toHaveBeenCalledTimes(3);
     const secondStepMessages = streamInfer.mock.calls[1]?.[0].messages ?? [];
     expect(
       secondStepMessages.some(
         (message) =>
           message.role === 'system' &&
           message.content.includes('Retrieved 1 evidence chunk'),
+      ),
+    ).toBe(true);
+    const finalMessages = streamInfer.mock.calls[2]?.[0].messages ?? [];
+    expect(
+      finalMessages.some(
+        (message) =>
+          message.role === 'system' &&
+          message.content.includes('Retrieved evidence:'),
       ),
     ).toBe(true);
     expect(result.assistantText).toBe(

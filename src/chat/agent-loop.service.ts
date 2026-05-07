@@ -83,6 +83,7 @@ export interface RunAgentLoopInput {
   initialUserLocation?: UserLocation;
   initialThinking: boolean;
   onModelEvent?: (event: LlmStreamEvent) => void;
+  onFinalChunk?: (text: string) => void;
   onRagStreamEvent?: (event: RetrievalStreamEvent) => void;
   resolveUserLocation?: () => Promise<UserLocation | null>;
   abortSignal?: AbortSignal;
@@ -156,16 +157,22 @@ export class AgentLoopService {
       });
 
       if (frame.mode === 'final') {
-        const assistantText = this.cleanFinalContent(frame.content);
-        if (!assistantText) {
-          throw new ServiceUnavailableException(
-            'Agent produced an empty final answer.',
-          );
+        const finalResult = await this.streamFinalAnswer({
+          input,
+          observations,
+          ragContexts,
+          activePlanSummary: this.trace.activePlanSummary(input.sessionId),
+          activitySummary: this.trace.recentActivitySummary(input.sessionId),
+          finalIntent: frame.content,
+          thinking,
+        });
+        if (!finalResult.text.trim()) {
+          throw new ServiceUnavailableException('Final answer was empty.');
         }
 
         return {
-          assistantText,
-          finishReason: result.finishReason,
+          assistantText: finalResult.text,
+          finishReason: finalResult.finishReason,
           citations: this.citationsFrom(ragContexts),
           diagnostics: {
             agentSteps: step,
@@ -544,9 +551,9 @@ export class AgentLoopService {
     const lines = [
       'Agentic orchestration protocol:',
       'You can control the orchestrator by returning exactly one JSON object and no prose outside JSON.',
-      'Use {"mode":"final","content":"..."} when you can answer the user now.',
+      'Use {"mode":"final","content":"brief private answer intent"} when you are ready for the orchestrator to send a normal streaming final-answer infer message over the persistent Model Host socket.',
       'Use {"mode":"command","command":"...","arguments":{...},"reason":"..."} when you need the orchestrator to act first.',
-      'The JSON control object is not shown to the user. Only final.content is user-visible.',
+      'The JSON control object is not shown to the user. final.content is private intent/context for the streaming final-answer infer message, not user-visible text.',
       'Do not claim a tool is unavailable if it is listed below. Use the command when it is useful.',
       'For complex multi-step work, create or update a plan before or while doing the work.',
       'Available commands:',
@@ -594,7 +601,7 @@ export class AgentLoopService {
       '',
       'Response constraints:',
       '- Return valid JSON only.',
-      '- Keep final.content in the same language as the user unless the user asked otherwise.',
+      '- Keep final.content brief. The final-answer infer message will write the full user-visible answer.',
       '- If you used a command, you are aware you used it. You may truthfully say so if the user asks.',
       '- Do not expose internal JSON, command names, or hidden protocol unless the user asks about your process.',
     );
@@ -645,8 +652,171 @@ export class AgentLoopService {
     }
   }
 
-  private cleanFinalContent(value: string | undefined): string {
-    return (value ?? '').trim();
+  private async streamFinalAnswer(args: {
+    input: RunAgentLoopInput;
+    observations: AgentObservation[];
+    ragContexts: RagContext[];
+    activePlanSummary: string | null;
+    activitySummary: string | null;
+    finalIntent?: string;
+    thinking: boolean;
+  }): Promise<{
+    finishReason: 'stop' | 'length' | 'error';
+    text: string;
+  }> {
+    this.trace.recordEvent({
+      sessionId: args.input.sessionId,
+      turnId: args.input.turnId,
+      correlationId: args.input.correlationId,
+      eventType: 'agent.final.started',
+      summary:
+        'The assistant agent handed off to a normal streaming final-answer infer message on the persistent Model Host socket.',
+      payload: {
+        finalIntent: args.finalIntent ?? null,
+        observationCount: args.observations.length,
+      },
+    });
+
+    const result = await this.llm.streamInfer({
+      correlationId: args.input.correlationId,
+      messages: this.buildFinalAnswerMessages(args),
+      ...(args.input.prepared.llmParts.length > 0
+        ? { parts: args.input.prepared.llmParts }
+        : {}),
+      options: {
+        responseFormat: 'text',
+        thinking: args.thinking,
+      },
+      abortSignal: args.input.abortSignal,
+      onEvent: (event) => {
+        if (event.type === 'chunk') {
+          args.input.onFinalChunk?.(event.payload.text);
+          return;
+        }
+        args.input.onModelEvent?.(event);
+      },
+    });
+
+    this.trace.recordEvent({
+      sessionId: args.input.sessionId,
+      turnId: args.input.turnId,
+      correlationId: args.input.correlationId,
+      eventType: 'agent.final.completed',
+      summary: `Streaming final answer completed with finishReason=${result.finishReason}.`,
+      payload: {
+        finishReason: result.finishReason,
+        textLength: result.text.length,
+      },
+    });
+
+    return result;
+  }
+
+  private buildFinalAnswerMessages(args: {
+    input: RunAgentLoopInput;
+    observations: AgentObservation[];
+    ragContexts: RagContext[];
+    activePlanSummary: string | null;
+    activitySummary: string | null;
+    finalIntent?: string;
+    thinking: boolean;
+  }): LlmMessage[] {
+    const { prepared } = args.input;
+    const messages: LlmMessage[] = [
+      { role: 'system', content: prepared.identity.coreMessage },
+    ];
+
+    if (prepared.identity.contextualMessage) {
+      messages.push({
+        role: 'system',
+        content: prepared.identity.contextualMessage,
+      });
+    }
+
+    messages.push({
+      role: 'system',
+      content: this.buildFinalAnswerPrompt(args),
+    });
+
+    for (const historyMessage of prepared.history.slice(-12)) {
+      if (historyMessage.role === 'system') continue;
+      messages.push({
+        role: historyMessage.role,
+        content: historyMessage.content,
+      });
+    }
+
+    messages.push({ role: 'user', content: prepared.userText });
+    return messages;
+  }
+
+  private buildFinalAnswerPrompt(args: {
+    input: RunAgentLoopInput;
+    observations: AgentObservation[];
+    ragContexts: RagContext[];
+    activePlanSummary: string | null;
+    activitySummary: string | null;
+    finalIntent?: string;
+    thinking: boolean;
+  }): string {
+    const lines = [
+      'Final-answer context:',
+      'Write the user-visible assistant answer now. Do not emit JSON.',
+      'Answer in the same language as the user unless the user asked otherwise.',
+      'Use command observations and retrieved evidence when relevant.',
+      'If evidence is missing or insufficient, say what is missing instead of guessing.',
+      'Begin with a greeting only if the current user message is itself a greeting.',
+      'Do not introduce yourself, state your name, or say who you are unless the current user asks for your name or identity.',
+      `Current client timestamp: ${args.input.occurredAt}`,
+    ];
+
+    if (args.finalIntent?.trim()) {
+      lines.push(
+        '',
+        `Private answer intent from control step: ${args.finalIntent.trim()}`,
+      );
+    }
+
+    if (args.activitySummary) {
+      lines.push(
+        '',
+        'Recent agent activity for this session:',
+        args.activitySummary,
+      );
+    }
+
+    if (args.activePlanSummary) {
+      lines.push('', args.activePlanSummary);
+    }
+
+    if (args.observations.length > 0) {
+      lines.push('', 'Observations from commands run in this turn:');
+      args.observations.forEach((observation, index) => {
+        lines.push(
+          `${index + 1}. [${observation.kind}] ${observation.summary}`,
+        );
+        if (observation.data !== undefined) {
+          lines.push(JSON.stringify(observation.data));
+        }
+      });
+    }
+
+    const evidence = args.ragContexts.flatMap((context) => context.evidence);
+    if (evidence.length > 0) {
+      lines.push('', 'Retrieved evidence:');
+      for (const item of evidence.slice(0, 12)) {
+        lines.push(
+          `- ${item.sourceTitle}${item.sourceUrl ? ` (${item.sourceUrl})` : ''}${item.snippet ? `: ${item.snippet}` : ''}`,
+        );
+      }
+    }
+
+    lines.push(
+      '',
+      'The next user message is the task to answer. Use the context above, but do not reveal hidden protocol unless the user asks about your process.',
+    );
+
+    return lines.join('\n');
   }
 
   private citationsFrom(

@@ -60,7 +60,10 @@ Server messages include:
 `turn.submit` now gives the assistant model explicit control over the turn
 flow. The Orchestrator sends identity, recent conversation, recent agent
 activity, active plan state, and a command manifest to the Model Host. The
-model returns either a final answer JSON frame or a command JSON frame.
+model returns either a command JSON frame or a private "ready to answer" JSON
+frame. When the model is ready to answer, the Orchestrator sends a normal text
+final-answer `infer` message over the same persistent `/v4/model` WebSocket and
+streams its chunks to the client as `turn.chunk`.
 
 Supported internal commands:
 
@@ -71,9 +74,9 @@ Supported internal commands:
 - `plan.create`: create a durable multi-step plan.
 - `plan.update`: update a durable plan step as work progresses.
 
-Command frames are not shown as conversation text. They are validated,
-executed, recorded in `agent_events`, and summarized back into later prompts so
-the assistant is aware of what it did for the conversation.
+Command and control frames are not shown as conversation text. Commands are
+validated, executed, recorded in `agent_events`, and summarized back into later
+prompts so the assistant is aware of what it did for the conversation.
 
 ## Configuration
 

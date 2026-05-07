@@ -327,6 +327,9 @@ export class ChatStreamHandler {
         onRagStreamEvent: (event: RetrievalStreamEvent) => {
           send('turn.retrieval', { event });
         },
+        onFinalChunk: (text: string) => {
+          send('turn.chunk', { text });
+        },
         onModelEvent: (evt) => {
           switch (evt.type) {
             case 'queued':
@@ -361,7 +364,6 @@ export class ChatStreamHandler {
       failTurn(503, 'Agent completed without producing final answer text');
       return;
     }
-    send('turn.chunk', { text: agentResult.assistantText });
 
     let persisted: PersistedTurn;
     try {

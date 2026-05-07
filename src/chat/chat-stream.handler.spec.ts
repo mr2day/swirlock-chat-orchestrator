@@ -230,9 +230,14 @@ describe('ChatStreamHandler agent loop routing', () => {
   it('forwards the agent final answer verbatim without deterministic word filtering', async () => {
     const agentRun: jest.MockedFunction<AgentLoopService['run']> = jest
       .fn()
-      .mockResolvedValue(
-        finalAgentResult('Salut! Conform datelor, nu ploua imediat.'),
-      );
+      .mockImplementation((args: Parameters<AgentLoopService['run']>[0]) => {
+        args.onFinalChunk?.('Salut! ');
+        args.onFinalChunk?.('Conform datelor, ');
+        args.onFinalChunk?.('nu ploua imediat.');
+        return Promise.resolve(
+          finalAgentResult('Salut! Conform datelor, nu ploua imediat.'),
+        );
+      });
     const { handler, chat } = makeHandler(agentRun);
     const ws = new FakeWebSocket();
 
@@ -260,7 +265,11 @@ describe('ChatStreamHandler agent loop routing', () => {
       .filter((event) => event.type === 'turn.chunk')
       .map((event) => event.payload?.text);
 
-    expect(chunks).toEqual(['Salut! Conform datelor, nu ploua imediat.']);
+    expect(chunks).toEqual([
+      'Salut! ',
+      'Conform datelor, ',
+      'nu ploua imediat.',
+    ]);
     expect(chat.persistTurn).toHaveBeenCalledWith(
       expect.objectContaining({
         assistantText: 'Salut! Conform datelor, nu ploua imediat.',
