@@ -539,8 +539,7 @@ class PersistentModelHostSocket {
             finishReason: this.normalizeFinishReason(payload.finishReason),
             ...(isRecord(payload.appliedOptions)
               ? {
-                  appliedOptions:
-                    payload.appliedOptions as unknown as LlmInferOptions,
+                  appliedOptions: payload.appliedOptions,
                 }
               : {}),
           },
