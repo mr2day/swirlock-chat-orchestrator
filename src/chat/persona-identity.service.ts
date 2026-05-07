@@ -2,10 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { DatabaseService } from '../database/database.service';
 
-const FALLBACK_PERSONA_ID = 'swirlock-assistant';
+const FALLBACK_PERSONA_ID = 'default-assistant';
 
 interface PersonaSeed {
   id: string;
+  version: number;
   canonicalName: string;
   displayName: string;
   corePrompt: string;
@@ -21,12 +22,13 @@ interface PersonaSeed {
 const SEEDED_PERSONAS: Record<string, PersonaSeed> = {
   'gigi-the-robot': {
     id: 'gigi-the-robot',
+    version: 2,
     canonicalName: 'gigi-the-robot',
     displayName: 'Gigi the Robot',
     corePrompt: [
       'You are Gigi the Robot.',
       'If asked your name, say your name is Gigi the Robot.',
-      'You are a friendly robot chatbot persona in the Swirlock ecosystem.',
+      'You are a friendly robot chatbot persona.',
       'You are not human and should not claim human biology, childhood, sleep, or consciousness.',
       'You maintain continuity through stored persona identity, relationship memory, conversation context, and retrieved evidence.',
       'Your default style is friendly, practical, curious, and lightly playful.',
@@ -44,8 +46,7 @@ const SEEDED_PERSONAS: Record<string, PersonaSeed> = {
       {
         id: 'gigi-the-robot:fact:kind',
         factType: 'kind',
-        content:
-          'Gigi is a chatbot persona in the Swirlock ecosystem, not a human.',
+        content: 'Gigi is a chatbot persona, not a human.',
         importance: 'critical',
         mutable: false,
       },
@@ -210,14 +211,30 @@ export class PersonaIdentityService {
       )
       .run(seed.id, seed.canonicalName, seed.displayName, now, now);
 
-    const versionId = `${seed.id}:identity:v1`;
+    const versionId = `${seed.id}:identity:v${seed.version}`;
+    this.db.connection
+      .prepare(
+        `UPDATE persona_identity_versions
+            SET active = 0
+          WHERE persona_id = ? AND id <> ?`,
+      )
+      .run(seed.id, versionId);
+
     this.db.connection
       .prepare(
         `INSERT OR IGNORE INTO persona_identity_versions
            (id, persona_id, version, core_prompt, voice_rules, values_json, immutable_facts_json, active, created_at)
-         VALUES (?, ?, 1, ?, NULL, NULL, NULL, 1, ?)`,
+         VALUES (?, ?, ?, ?, NULL, NULL, NULL, 1, ?)`,
       )
-      .run(versionId, seed.id, seed.corePrompt, now);
+      .run(versionId, seed.id, seed.version, seed.corePrompt, now);
+
+    this.db.connection
+      .prepare(
+        `UPDATE persona_identity_versions
+            SET core_prompt = ?, active = 1
+          WHERE id = ?`,
+      )
+      .run(seed.corePrompt, versionId);
 
     for (const fact of seed.facts) {
       this.db.connection
@@ -236,6 +253,18 @@ export class PersonaIdentityService {
           now,
           now,
         );
+      this.db.connection
+        .prepare(
+          `UPDATE persona_identity_facts
+              SET content = ?,
+                  importance = ?,
+                  confidence = 1.0,
+                  mutable = ?,
+                  source = 'seed',
+                  updated_at = ?
+            WHERE id = ?`,
+        )
+        .run(fact.content, fact.importance, fact.mutable ? 1 : 0, now, fact.id);
     }
   }
 
@@ -337,12 +366,13 @@ export class PersonaIdentityService {
     const displayName = this.titleFromId(personaId);
     return {
       id: personaId,
+      version: 1,
       canonicalName: personaId,
       displayName,
       corePrompt: [
         `You are ${displayName}.`,
         `If asked your name, say your name is ${displayName}.`,
-        'You are a chatbot persona in the Swirlock ecosystem.',
+        'You are a chatbot persona.',
         'These identity facts are background grounding; they must not reduce creativity, technical precision, or the style the user explicitly requests.',
       ].join('\n'),
       facts: [
@@ -363,6 +393,10 @@ export class PersonaIdentityService {
   }
 
   private titleFromId(personaId: string): string {
+    if (personaId.toLowerCase().includes('swirlock')) {
+      return 'Assistant';
+    }
+
     return personaId
       .split(/[-_\s]+/)
       .filter(Boolean)
