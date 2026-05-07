@@ -272,7 +272,7 @@ describe('ChatStreamHandler thinking routing', () => {
     expect(ws.sent.length).toBeGreaterThan(sentAfterFirstTurn);
   });
 
-  it('removes leading greetings from non-greeting streamed answers', async () => {
+  it('forwards streamed answer text verbatim without deterministic word filtering', async () => {
     const chat = {
       assertSessionOwnership: jest.fn(),
       prepareTurn: jest.fn().mockResolvedValue({
@@ -330,10 +330,14 @@ describe('ChatStreamHandler thinking routing', () => {
       .filter((event) => event.type === 'turn.chunk')
       .map((event) => event.payload?.text);
 
-    expect(chunks).toEqual(['Conform datelor, nu ploua imediat.']);
+    expect(chunks).toEqual([
+      'Sa',
+      'lut! ',
+      'Conform datelor, nu ploua imediat.',
+    ]);
     expect(chat.persistTurn).toHaveBeenCalledWith(
       expect.objectContaining({
-        assistantText: 'Conform datelor, nu ploua imediat.',
+        assistantText: 'Salut! Conform datelor, nu ploua imediat.',
       }),
     );
   });

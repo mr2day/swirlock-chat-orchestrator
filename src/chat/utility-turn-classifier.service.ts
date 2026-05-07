@@ -156,11 +156,7 @@ export class UtilityTurnClassifierService {
       240,
     );
 
-    if (
-      shouldRetrieve &&
-      shouldThink &&
-      this.isRoutineWeatherRetrieval(intent, resolvedQueryText)
-    ) {
+    if (shouldRetrieve && shouldThink && this.isRoutineWeatherIntent(intent)) {
       shouldThink = false;
       route = 'retrieve';
       reason = this.limitText(
@@ -197,15 +193,22 @@ export class UtilityTurnClassifierService {
     };
   }
 
-  private isRoutineWeatherRetrieval(
-    intent: string,
-    queryText: string,
-  ): boolean {
-    const combined = `${intent} ${queryText}`.toLowerCase();
+  private isRoutineWeatherIntent(intent: string): boolean {
+    return new Set([
+      'weather',
+      'weather_forecast',
+      'current_weather',
+      'current_weather_forecast',
+      'current_conditions',
+    ]).has(this.normalizeIntentLabel(intent));
+  }
 
-    return /(weather|forecast|current[-_ ]?conditions|current[-_ ]?weather|meteo|vreme|prognoz|ploaie|rain|temperature|temperatur)/.test(
-      combined,
-    );
+  private normalizeIntentLabel(intent: string): string {
+    return intent
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
   }
 
   private fallbackDecision(input: ClassifyTurnInput): UtilityTurnDecision {

@@ -47,9 +47,8 @@ describe('PromptBuilderService', () => {
 
     const turnContext = messages[1]?.content ?? '';
     expect(turnContext).toContain(
-      'Latest user message greeting status: not a greeting',
+      'Begin with a greeting only if the current user message is itself a greeting',
     );
-    expect(turnContext).toContain('Do not begin with a greeting');
     expect(turnContext).toContain('Do not introduce yourself');
     expect(turnContext).toContain('This is an ongoing conversation');
     expect(turnContext).toContain('Start with the substance of the answer.');

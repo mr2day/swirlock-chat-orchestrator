@@ -44,7 +44,7 @@ export class PromptBuilderService {
       'Operational context for this turn:',
       'Answer the user concisely, helpfully, and honestly.',
       'Reply in the same language the user used unless they explicitly ask for another language.',
-      'If the current user message is not a greeting, do not open with a greeting.',
+      'Begin with a greeting only when the current user message is itself a greeting.',
       'Do not reintroduce yourself or restate your name unless the current user asks who you are or what your name is.',
       'When recent conversation is present, continue naturally instead of writing as if this were the first turn.',
       'Use retrieved evidence when it is available. If the evidence is insufficient for a factual or current claim, say what is missing instead of guessing.',
@@ -111,8 +111,6 @@ export class PromptBuilderService {
     lines: string[],
     input: BuildPromptInput,
   ): void {
-    const latestUserIsGreeting = this.isGreeting(input.userText);
-    const latestUserAsksIdentity = this.isIdentityQuestion(input.userText);
     const hasAssistantHistory = input.history.some(
       (message) => message.role === 'assistant',
     );
@@ -120,26 +118,10 @@ export class PromptBuilderService {
     lines.push(
       '',
       'Response constraints for this exact turn:',
-      `- Latest user message greeting status: ${
-        latestUserIsGreeting ? 'greeting' : 'not a greeting'
-      }.`,
+      '- Begin with a greeting only if the current user message is itself a greeting.',
+      '- Do not introduce yourself, state your name, or say who you are unless the current user asks for your name or identity.',
+      `- If answering your name, use the exact persona display name "${input.identity.displayName}" and do not translate it.`,
     );
-
-    if (!latestUserIsGreeting) {
-      lines.push(
-        '- Do not begin with a greeting such as Salut, Buna, Hello, Hi, or Hey.',
-      );
-    }
-
-    if (!latestUserAsksIdentity) {
-      lines.push(
-        '- Do not introduce yourself, state your name, or say who you are.',
-      );
-    } else {
-      lines.push(
-        `- If answering your name, use the exact persona display name "${input.identity.displayName}" and do not translate it.`,
-      );
-    }
 
     if (hasAssistantHistory) {
       lines.push(
@@ -148,15 +130,5 @@ export class PromptBuilderService {
     }
 
     lines.push('- Start with the substance of the answer.');
-  }
-
-  private isGreeting(value: string): boolean {
-    return /^(salut|buna|bună|hello|hi|hey)\b[!,. ]*$/i.test(value.trim());
-  }
-
-  private isIdentityQuestion(value: string): boolean {
-    return /\b(cum te cheama|cum te cheamă|numele tau|numele tău|your name|who are you|what are you called)\b/i.test(
-      value,
-    );
   }
 }
