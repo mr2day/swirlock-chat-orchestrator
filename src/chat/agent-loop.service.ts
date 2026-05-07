@@ -1,0 +1,745 @@
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import type { LlmMessage, LlmStreamEvent } from '../llm-host/llm-host.service';
+import { LlmHostService } from '../llm-host/llm-host.service';
+import { RagService } from '../rag/rag.service';
+import type {
+  RagAllowedMode,
+  RagContext,
+  RagFreshness,
+  RagHint,
+  RetrievalStreamEvent,
+  UserLocation,
+} from '../rag/rag.service';
+import type { PreparedAgentTurn } from './chat.service';
+import { AgentTraceService } from './agent-trace.service';
+import type { AgentPlanStepStatus } from './agent-trace.service';
+
+const MAX_AGENT_STEPS = 8;
+const MAX_TOOL_COMMANDS = 5;
+
+const FRESHNESS_VALUES: RagFreshness[] = ['low', 'medium', 'high', 'realtime'];
+const ALLOWED_MODES: RagAllowedMode[] = ['local_rag', 'live_web'];
+const HINT_KINDS: RagHint['kind'][] = [
+  'entity',
+  'time_reference',
+  'preference',
+  'disambiguation',
+  'constraint',
+];
+const PLAN_STATUSES: AgentPlanStepStatus[] = [
+  'pending',
+  'in_progress',
+  'completed',
+  'blocked',
+  'cancelled',
+];
+
+type AgentMode = 'final' | 'command';
+
+interface AgentFrame {
+  mode: AgentMode;
+  content?: string;
+  command?: string;
+  arguments?: Record<string, unknown>;
+  reason?: string;
+}
+
+interface AgentObservation {
+  kind: string;
+  summary: string;
+  data?: unknown;
+}
+
+interface AgentCommandResult {
+  observation: AgentObservation;
+  ragContext?: RagContext;
+  thinking?: boolean;
+  userLocation?: UserLocation;
+}
+
+export interface AgentLoopResult {
+  assistantText: string;
+  finishReason: 'stop' | 'length' | 'error';
+  citations: Array<{
+    evidenceId: string;
+    sourceTitle: string;
+    sourceUrl?: string;
+  }>;
+  diagnostics: {
+    agentSteps: number;
+    toolCommands: number;
+    commands: string[];
+    retrievalUsed: boolean;
+    retrievalMode: RagContext['retrievalMode'];
+  };
+}
+
+export interface RunAgentLoopInput {
+  sessionId: string;
+  turnId: string;
+  correlationId: string;
+  prepared: PreparedAgentTurn;
+  occurredAt: string;
+  initialUserLocation?: UserLocation;
+  initialThinking: boolean;
+  onModelEvent?: (event: LlmStreamEvent) => void;
+  onRagStreamEvent?: (event: RetrievalStreamEvent) => void;
+  resolveUserLocation?: () => Promise<UserLocation | null>;
+  abortSignal?: AbortSignal;
+}
+
+@Injectable()
+export class AgentLoopService {
+  constructor(
+    private readonly llm: LlmHostService,
+    private readonly rag: RagService,
+    private readonly trace: AgentTraceService,
+  ) {}
+
+  async run(input: RunAgentLoopInput): Promise<AgentLoopResult> {
+    const observations: AgentObservation[] = [];
+    const commands: string[] = [];
+    const ragContexts: RagContext[] = [];
+    let thinking = input.initialThinking;
+    let userLocation = input.initialUserLocation;
+    let toolCommands = 0;
+
+    this.trace.recordEvent({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      correlationId: input.correlationId,
+      eventType: 'agent.loop.started',
+      summary: 'The assistant agent received control of the turn flow.',
+      payload: {
+        maxAgentSteps: MAX_AGENT_STEPS,
+        maxToolCommands: MAX_TOOL_COMMANDS,
+      },
+    });
+
+    for (let step = 1; step <= MAX_AGENT_STEPS; step++) {
+      this.throwIfAborted(input.abortSignal);
+      const result = await this.llm.streamInfer({
+        correlationId: input.correlationId,
+        messages: this.buildAgentMessages({
+          input,
+          observations,
+          activePlanSummary: this.trace.activePlanSummary(input.sessionId),
+          activitySummary: this.trace.recentActivitySummary(input.sessionId),
+          step,
+          thinking,
+          userLocation,
+        }),
+        ...(input.prepared.llmParts.length > 0
+          ? { parts: input.prepared.llmParts }
+          : {}),
+        options: {
+          responseFormat: 'json',
+          thinking,
+          ollama: { temperature: 0 },
+        },
+        abortSignal: input.abortSignal,
+        onEvent: input.onModelEvent,
+      });
+
+      const frame = this.parseAgentFrame(result.text);
+      this.trace.recordEvent({
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        correlationId: input.correlationId,
+        eventType: 'agent.step.completed',
+        summary:
+          frame.mode === 'final'
+            ? 'The assistant agent produced a final answer.'
+            : `The assistant agent requested command ${frame.command}.`,
+        command: frame.mode === 'command' ? frame.command : undefined,
+        payload: { step, frame },
+      });
+
+      if (frame.mode === 'final') {
+        const assistantText = this.cleanFinalContent(frame.content);
+        if (!assistantText) {
+          throw new ServiceUnavailableException(
+            'Agent produced an empty final answer.',
+          );
+        }
+
+        return {
+          assistantText,
+          finishReason: result.finishReason,
+          citations: this.citationsFrom(ragContexts),
+          diagnostics: {
+            agentSteps: step,
+            toolCommands,
+            commands,
+            retrievalUsed: ragContexts.some((ctx) => ctx.retrievalUsed),
+            retrievalMode: this.combinedRetrievalMode(ragContexts),
+          },
+        };
+      }
+
+      if (!frame.command) {
+        observations.push({
+          kind: 'command.error',
+          summary:
+            'The previous control frame had mode "command" but no command name.',
+        });
+        continue;
+      }
+
+      if (toolCommands >= MAX_TOOL_COMMANDS) {
+        observations.push({
+          kind: 'budget.exhausted',
+          summary:
+            'The tool-command budget is exhausted. Produce a final answer using available observations.',
+        });
+        continue;
+      }
+
+      toolCommands++;
+      commands.push(frame.command);
+      const commandResult = await this.executeCommand({
+        input,
+        frame,
+        userLocation,
+      });
+      observations.push(commandResult.observation);
+
+      if (commandResult.ragContext) {
+        ragContexts.push(commandResult.ragContext);
+      }
+      if (commandResult.thinking !== undefined) {
+        thinking = commandResult.thinking;
+      }
+      if (commandResult.userLocation !== undefined) {
+        userLocation = commandResult.userLocation;
+      }
+    }
+
+    throw new ServiceUnavailableException(
+      'Agent loop reached its step limit before producing a final answer.',
+    );
+  }
+
+  private async executeCommand(args: {
+    input: RunAgentLoopInput;
+    frame: AgentFrame;
+    userLocation?: UserLocation;
+  }): Promise<AgentCommandResult> {
+    const command = args.frame.command!;
+    const commandArgs = args.frame.arguments ?? {};
+    this.trace.recordEvent({
+      sessionId: args.input.sessionId,
+      turnId: args.input.turnId,
+      correlationId: args.input.correlationId,
+      eventType: 'agent.command.requested',
+      command,
+      summary: args.frame.reason
+        ? this.limitText(args.frame.reason, 300)
+        : `The assistant agent requested ${command}.`,
+      payload: commandArgs,
+    });
+
+    try {
+      switch (command) {
+        case 'rag.retrieve':
+          return await this.executeRagRetrieve(
+            args.input,
+            commandArgs,
+            args.userLocation,
+          );
+        case 'location.request':
+          return await this.executeLocationRequest(args.input);
+        case 'agent.continue_with_options':
+          return this.executeContinueWithOptions(commandArgs);
+        case 'plan.create':
+          return this.executePlanCreate(args.input, commandArgs);
+        case 'plan.update':
+          return this.executePlanUpdate(args.input, commandArgs);
+        case 'answer.final':
+          return {
+            observation: {
+              kind: 'command.error',
+              summary:
+                'Use {"mode":"final","content":"..."} instead of answer.final.',
+            },
+          };
+        default:
+          return {
+            observation: {
+              kind: 'command.error',
+              summary: `Unsupported command: ${command}.`,
+            },
+          };
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.trace.recordEvent({
+        sessionId: args.input.sessionId,
+        turnId: args.input.turnId,
+        correlationId: args.input.correlationId,
+        eventType: 'agent.command.failed',
+        command,
+        summary: message,
+        payload: { commandArgs },
+      });
+      return {
+        observation: {
+          kind: 'command.error',
+          summary: `${command} failed: ${message}`,
+        },
+      };
+    }
+  }
+
+  private async executeRagRetrieve(
+    input: RunAgentLoopInput,
+    commandArgs: Record<string, unknown>,
+    userLocation?: UserLocation,
+  ): Promise<AgentCommandResult> {
+    const query = this.stringArg(commandArgs.query);
+    if (!query) {
+      throw new Error('rag.retrieve requires arguments.query.');
+    }
+
+    const freshness = this.enumArg(
+      commandArgs.freshness,
+      FRESHNESS_VALUES,
+      'medium',
+    );
+    const allowedModes = this.allowedModes(commandArgs.allowedModes);
+    const hints = this.hints(commandArgs.hints);
+    const intent = this.stringArg(commandArgs.intent);
+    const ragContext = await this.rag.retrieve({
+      correlationId: input.correlationId,
+      sessionId: input.sessionId,
+      userText: input.prepared.userText,
+      parts: [{ type: 'text', text: query }],
+      resolvedQueryText: query,
+      ...(intent ? { intent } : {}),
+      freshness,
+      allowedModes,
+      hints,
+      ...(userLocation ? { userLocation } : {}),
+      onStreamEvent: input.onRagStreamEvent,
+      abortSignal: input.abortSignal,
+    });
+    const evidenceTitles = ragContext.evidence
+      .slice(0, 5)
+      .map((evidence) => evidence.sourceTitle);
+    const summary =
+      ragContext.evidence.length > 0
+        ? `Retrieved ${ragContext.evidence.length} evidence chunk(s) for "${query}": ${evidenceTitles.join('; ')}.`
+        : `Retrieved no evidence for "${query}".`;
+
+    this.trace.recordEvent({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      correlationId: input.correlationId,
+      eventType: 'agent.command.completed',
+      command: 'rag.retrieve',
+      summary,
+      payload: {
+        query,
+        retrievalMode: ragContext.retrievalMode,
+        evidenceCount: ragContext.evidence.length,
+        evidence: ragContext.evidence.slice(0, 8),
+      },
+    });
+
+    return {
+      ragContext,
+      observation: {
+        kind: 'rag.retrieve',
+        summary,
+        data: {
+          retrievalMode: ragContext.retrievalMode,
+          evidence: ragContext.evidence.slice(0, 8),
+        },
+      },
+    };
+  }
+
+  private async executeLocationRequest(
+    input: RunAgentLoopInput,
+  ): Promise<AgentCommandResult> {
+    const location = input.resolveUserLocation
+      ? await input.resolveUserLocation()
+      : null;
+    const summary = location
+      ? `User granted location: latitude ${location.latitude}, longitude ${location.longitude}.`
+      : 'User location was not available for this turn.';
+
+    this.trace.recordEvent({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      correlationId: input.correlationId,
+      eventType: 'agent.command.completed',
+      command: 'location.request',
+      summary,
+      payload: location ?? { available: false },
+    });
+
+    return {
+      ...(location ? { userLocation: location } : {}),
+      observation: {
+        kind: 'location.request',
+        summary,
+        data: location ?? { available: false },
+      },
+    };
+  }
+
+  private executeContinueWithOptions(
+    commandArgs: Record<string, unknown>,
+  ): AgentCommandResult {
+    const thinking = commandArgs.thinking === true;
+    return {
+      thinking,
+      observation: {
+        kind: 'agent.continue_with_options',
+        summary: `The next agent step will use thinking=${thinking}.`,
+        data: { thinking },
+      },
+    };
+  }
+
+  private executePlanCreate(
+    input: RunAgentLoopInput,
+    commandArgs: Record<string, unknown>,
+  ): AgentCommandResult {
+    const title = this.stringArg(commandArgs.title) || 'Agent plan';
+    const stepsRaw = Array.isArray(commandArgs.steps) ? commandArgs.steps : [];
+    const steps = stepsRaw
+      .filter((step): step is Record<string, unknown> => this.isRecord(step))
+      .map((step) => ({
+        title: this.stringArg(step.title) || 'Untitled step',
+        ...(this.stringArg(step.details)
+          ? { details: this.stringArg(step.details)! }
+          : {}),
+      }))
+      .slice(0, 12);
+    if (steps.length === 0) {
+      throw new Error('plan.create requires at least one step.');
+    }
+
+    const plan = this.trace.createPlan({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      correlationId: input.correlationId,
+      title,
+      steps,
+    });
+
+    this.trace.recordEvent({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      correlationId: input.correlationId,
+      eventType: 'agent.command.completed',
+      command: 'plan.create',
+      summary: `Created plan "${plan.title}" with ${plan.steps.length} step(s).`,
+      payload: plan,
+    });
+
+    return {
+      observation: {
+        kind: 'plan.create',
+        summary: `Created plan "${plan.title}" with ${plan.steps.length} step(s).`,
+        data: plan,
+      },
+    };
+  }
+
+  private executePlanUpdate(
+    input: RunAgentLoopInput,
+    commandArgs: Record<string, unknown>,
+  ): AgentCommandResult {
+    const status = this.enumArg(
+      commandArgs.status,
+      PLAN_STATUSES,
+      'in_progress',
+    );
+    const plan = this.trace.updatePlanStep({
+      sessionId: input.sessionId,
+      ...(this.stringArg(commandArgs.planId)
+        ? { planId: this.stringArg(commandArgs.planId)! }
+        : {}),
+      ...(this.stringArg(commandArgs.stepId)
+        ? { stepId: this.stringArg(commandArgs.stepId)! }
+        : {}),
+      ...(typeof commandArgs.stepIndex === 'number'
+        ? { stepIndex: commandArgs.stepIndex }
+        : {}),
+      status,
+      ...(this.stringArg(commandArgs.note)
+        ? { note: this.stringArg(commandArgs.note)! }
+        : {}),
+    });
+
+    this.trace.recordEvent({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      correlationId: input.correlationId,
+      eventType: 'agent.command.completed',
+      command: 'plan.update',
+      summary: `Updated plan "${plan.title}".`,
+      payload: plan,
+    });
+
+    return {
+      observation: {
+        kind: 'plan.update',
+        summary: `Updated plan "${plan.title}".`,
+        data: plan,
+      },
+    };
+  }
+
+  private buildAgentMessages(args: {
+    input: RunAgentLoopInput;
+    observations: AgentObservation[];
+    activePlanSummary: string | null;
+    activitySummary: string | null;
+    step: number;
+    thinking: boolean;
+    userLocation?: UserLocation;
+  }): LlmMessage[] {
+    const { prepared } = args.input;
+    const messages: LlmMessage[] = [
+      { role: 'system', content: prepared.identity.coreMessage },
+    ];
+
+    if (prepared.identity.contextualMessage) {
+      messages.push({
+        role: 'system',
+        content: prepared.identity.contextualMessage,
+      });
+    }
+
+    messages.push({
+      role: 'system',
+      content: this.buildAgentControlPrompt(args),
+    });
+
+    for (const historyMessage of prepared.history.slice(-12)) {
+      if (historyMessage.role === 'system') continue;
+      messages.push({
+        role: historyMessage.role,
+        content: historyMessage.content,
+      });
+    }
+
+    messages.push({ role: 'user', content: prepared.userText });
+    return messages;
+  }
+
+  private buildAgentControlPrompt(args: {
+    input: RunAgentLoopInput;
+    observations: AgentObservation[];
+    activePlanSummary: string | null;
+    activitySummary: string | null;
+    step: number;
+    thinking: boolean;
+    userLocation?: UserLocation;
+  }): string {
+    const lines = [
+      'Agentic orchestration protocol:',
+      'You can control the orchestrator by returning exactly one JSON object and no prose outside JSON.',
+      'Use {"mode":"final","content":"..."} when you can answer the user now.',
+      'Use {"mode":"command","command":"...","arguments":{...},"reason":"..."} when you need the orchestrator to act first.',
+      'The JSON control object is not shown to the user. Only final.content is user-visible.',
+      'Do not claim a tool is unavailable if it is listed below. Use the command when it is useful.',
+      'For complex multi-step work, create or update a plan before or while doing the work.',
+      'Available commands:',
+      '- rag.retrieve: search local/live evidence. arguments: { "query": string, "freshness"?: "low"|"medium"|"high"|"realtime", "allowedModes"?: ["local_rag"|"live_web"], "intent"?: string, "hints"?: [{ "kind": "entity"|"time_reference"|"preference"|"disambiguation"|"constraint", "text": string }] }.',
+      '- location.request: ask the UI for user location when the answer depends on the user real-world location. arguments: {}.',
+      '- agent.continue_with_options: continue with changed model options. arguments: { "thinking": boolean }.',
+      '- plan.create: create a durable task plan. arguments: { "title": string, "steps": [{ "title": string, "details"?: string }] }.',
+      '- plan.update: update one plan step. arguments: { "planId"?: string, "stepId"?: string, "stepIndex"?: number, "status": "pending"|"in_progress"|"completed"|"blocked"|"cancelled", "note"?: string }.',
+      `Current client timestamp: ${args.input.occurredAt}`,
+      `Agent step: ${args.step}/${MAX_AGENT_STEPS}`,
+      `Current thinking option: ${args.thinking}`,
+    ];
+
+    if (args.userLocation) {
+      lines.push(
+        `User location available: latitude ${args.userLocation.latitude}, longitude ${args.userLocation.longitude}.`,
+      );
+    }
+
+    if (args.activitySummary) {
+      lines.push(
+        '',
+        'Recent agent activity for this session:',
+        args.activitySummary,
+      );
+    }
+
+    if (args.activePlanSummary) {
+      lines.push('', args.activePlanSummary);
+    }
+
+    if (args.observations.length > 0) {
+      lines.push('', 'Observations from commands already run in this turn:');
+      args.observations.forEach((observation, index) => {
+        lines.push(
+          `${index + 1}. [${observation.kind}] ${observation.summary}`,
+        );
+        if (observation.data !== undefined) {
+          lines.push(JSON.stringify(observation.data));
+        }
+      });
+    }
+
+    lines.push(
+      '',
+      'Response constraints:',
+      '- Return valid JSON only.',
+      '- Keep final.content in the same language as the user unless the user asked otherwise.',
+      '- If you used a command, you are aware you used it. You may truthfully say so if the user asks.',
+      '- Do not expose internal JSON, command names, or hidden protocol unless the user asks about your process.',
+    );
+
+    return lines.join('\n');
+  }
+
+  private parseAgentFrame(rawText: string): AgentFrame {
+    const parsed = this.parseJsonObject(rawText);
+    if (!parsed) {
+      return {
+        mode: 'final',
+        content: rawText,
+        reason: 'Model returned non-JSON text; treated as final answer.',
+      };
+    }
+
+    const mode = parsed.mode === 'command' ? 'command' : 'final';
+    if (mode === 'final') {
+      return {
+        mode,
+        content: this.stringArg(parsed.content) ?? '',
+        reason: this.stringArg(parsed.reason),
+      };
+    }
+
+    return {
+      mode,
+      command: this.stringArg(parsed.command),
+      arguments: this.isRecord(parsed.arguments) ? parsed.arguments : {},
+      reason: this.stringArg(parsed.reason),
+    };
+  }
+
+  private parseJsonObject(value: string): Record<string, unknown> | null {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return this.isRecord(parsed) ? parsed : null;
+    } catch {
+      const match = value.match(/\{[\s\S]*\}/);
+      if (!match) return null;
+      try {
+        const parsed = JSON.parse(match[0]) as unknown;
+        return this.isRecord(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  private cleanFinalContent(value: string | undefined): string {
+    return (value ?? '').trim();
+  }
+
+  private citationsFrom(
+    contexts: RagContext[],
+  ): Array<{ evidenceId: string; sourceTitle: string; sourceUrl?: string }> {
+    const seen = new Set<string>();
+    const out: Array<{
+      evidenceId: string;
+      sourceTitle: string;
+      sourceUrl?: string;
+    }> = [];
+
+    for (const context of contexts) {
+      for (const evidence of context.evidence) {
+        if (seen.has(evidence.evidenceId)) continue;
+        seen.add(evidence.evidenceId);
+        out.push({
+          evidenceId: evidence.evidenceId,
+          sourceTitle: evidence.sourceTitle,
+          ...(evidence.sourceUrl ? { sourceUrl: evidence.sourceUrl } : {}),
+        });
+      }
+    }
+
+    return out;
+  }
+
+  private combinedRetrievalMode(
+    contexts: RagContext[],
+  ): RagContext['retrievalMode'] {
+    const used = contexts.filter((ctx) => ctx.retrievalUsed);
+    if (used.length === 0) return 'none';
+    if (used.some((ctx) => ctx.retrievalMode === 'local_and_live')) {
+      return 'local_and_live';
+    }
+    const modes = new Set(used.map((ctx) => ctx.retrievalMode));
+    if (modes.has('local_rag') && modes.has('live_web')) {
+      return 'local_and_live';
+    }
+    return used[used.length - 1]?.retrievalMode ?? 'none';
+  }
+
+  private allowedModes(value: unknown): RagAllowedMode[] {
+    if (!Array.isArray(value)) return ['local_rag', 'live_web'];
+    const modes = value.filter(
+      (mode): mode is RagAllowedMode =>
+        typeof mode === 'string' &&
+        ALLOWED_MODES.includes(mode as RagAllowedMode),
+    );
+    return modes.length > 0 ? modes : ['local_rag', 'live_web'];
+  }
+
+  private hints(value: unknown): RagHint[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((item): item is Record<string, unknown> => this.isRecord(item))
+      .map((item) => ({
+        kind: this.enumArg(item.kind, HINT_KINDS, 'constraint'),
+        text: this.limitText(this.stringArg(item.text) ?? '', 240),
+      }))
+      .filter((hint) => hint.text.length > 0)
+      .slice(0, 8);
+  }
+
+  private enumArg<T extends string>(
+    value: unknown,
+    allowed: readonly T[],
+    fallback: T,
+  ): T {
+    return typeof value === 'string' && allowed.includes(value as T)
+      ? (value as T)
+      : fallback;
+  }
+
+  private stringArg(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+  }
+
+  private throwIfAborted(abortSignal?: AbortSignal): void {
+    if (abortSignal?.aborted) {
+      throw new Error('aborted');
+    }
+  }
+
+  private limitText(value: string, maxLength: number): string {
+    const normalized = value.replace(/\s+/g, ' ').trim();
+    if (normalized.length <= maxLength) return normalized;
+    return `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
+  }
+}

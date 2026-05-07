@@ -7,14 +7,15 @@ import {
 } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 import { SERVICE_CONFIG } from '../config/config';
 import type { ServiceConfig } from '../config/config';
-import { LlmHostService } from '../llm-host/llm-host.service';
 import type { RetrievalStreamEvent } from '../rag/rag.service';
 import type { UserLocation } from '../rag/rag.service';
+import { AgentLoopService } from './agent-loop.service';
 import { ChatService } from './chat.service';
-import type { PersistedTurn, PreparedTurn } from './chat.service';
+import type { PersistedTurn, PreparedAgentTurn } from './chat.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { SubmitTurnDto } from './dto/submit-turn.dto';
 
@@ -66,7 +67,7 @@ export class ChatStreamHandler {
   constructor(
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly chat: ChatService,
-    private readonly llm: LlmHostService,
+    private readonly agentLoop: AgentLoopService,
   ) {}
 
   async handle(ws: WebSocket, ctx: ConnectionContext): Promise<void> {
@@ -277,38 +278,13 @@ export class ChatStreamHandler {
     };
     ws.once('close', onClose);
 
-    let prepared: PreparedTurn;
+    const turnId = randomUUID();
+    let prepared: PreparedAgentTurn;
     try {
-      prepared = await this.chat.prepareTurn({
+      prepared = this.chat.prepareAgentTurn({
         sessionId,
         dto,
-        correlationId,
         authUserId: ctx.authUserId,
-        ...(dto.userLocation
-          ? {
-              userLocation: {
-                latitude: dto.userLocation.latitude,
-                longitude: dto.userLocation.longitude,
-                ...(dto.userLocation.accuracyMeters !== undefined
-                  ? { accuracyMeters: dto.userLocation.accuracyMeters }
-                  : {}),
-                ...(dto.userLocation.capturedAt !== undefined
-                  ? { capturedAt: dto.userLocation.capturedAt }
-                  : {}),
-              },
-            }
-          : {}),
-        resolveUserLocation: () =>
-          this.requestLocationFromUi(
-            ws,
-            correlationId,
-            pendingLocations,
-            abort.signal,
-          ),
-        abortSignal: abort.signal,
-        onRagStreamEvent: (event: RetrievalStreamEvent) => {
-          send('turn.retrieval', { event });
-        },
       });
     } catch (err) {
       const status = err instanceof HttpException ? err.getStatus() : 500;
@@ -316,41 +292,60 @@ export class ChatStreamHandler {
       return;
     }
 
-    let assistantText = '';
-    let finishReason: 'stop' | 'length' | 'error' = 'stop';
-    const wantThinking = this.resolveThinkingRequest(
-      dto,
-      prepared.turnPlan.shouldThink,
-    );
+    const initialUserLocation = dto.userLocation
+      ? {
+          latitude: dto.userLocation.latitude,
+          longitude: dto.userLocation.longitude,
+          ...(dto.userLocation.accuracyMeters !== undefined
+            ? { accuracyMeters: dto.userLocation.accuracyMeters }
+            : {}),
+          ...(dto.userLocation.capturedAt !== undefined
+            ? { capturedAt: dto.userLocation.capturedAt }
+            : {}),
+        }
+      : undefined;
 
+    let agentResult: Awaited<ReturnType<AgentLoopService['run']>>;
+    let emittedStarted = false;
     try {
-      const result = await this.llm.streamInfer({
+      agentResult = await this.agentLoop.run({
+        sessionId,
+        turnId,
         correlationId,
-        messages: prepared.llmMessages,
-        ...(prepared.llmParts.length > 0 ? { parts: prepared.llmParts } : {}),
-        options: { thinking: wantThinking },
+        prepared,
+        occurredAt: dto.message.occurredAt,
+        ...(initialUserLocation ? { initialUserLocation } : {}),
+        initialThinking: this.resolveInitialThinkingRequest(dto),
         abortSignal: abort.signal,
-        onEvent: (evt) => {
+        resolveUserLocation: () =>
+          this.requestLocationFromUi(
+            ws,
+            correlationId,
+            pendingLocations,
+            abort.signal,
+          ),
+        onRagStreamEvent: (event: RetrievalStreamEvent) => {
+          send('turn.retrieval', { event });
+        },
+        onModelEvent: (evt) => {
           switch (evt.type) {
             case 'queued':
               send('turn.queued', evt.payload);
               break;
             case 'started':
-              send('turn.started');
+              if (!emittedStarted) {
+                send('turn.started');
+                emittedStarted = true;
+              }
               break;
             case 'thinking':
               send('turn.thinking', evt.payload);
-              break;
-            case 'chunk':
-              send('turn.chunk', evt.payload);
               break;
             default:
               break;
           }
         },
       });
-      assistantText = result.text;
-      finishReason = result.finishReason;
     } catch (err) {
       const status =
         err instanceof ServiceUnavailableException
@@ -362,19 +357,21 @@ export class ChatStreamHandler {
       return;
     }
 
-    if (assistantText.length === 0) {
-      failTurn(503, 'LLM Host completed without emitting any text chunks');
+    if (agentResult.assistantText.length === 0) {
+      failTurn(503, 'Agent completed without producing final answer text');
       return;
     }
+    send('turn.chunk', { text: agentResult.assistantText });
 
     let persisted: PersistedTurn;
     try {
       persisted = this.chat.persistTurn({
         sessionId,
+        turnId,
         parts: dto.message.parts,
         userText: prepared.userText,
         occurredAt: dto.message.occurredAt,
-        assistantText,
+        assistantText: agentResult.assistantText,
       });
     } catch (err) {
       this.log.error(`persistTurn failed: ${(err as Error).message}`);
@@ -388,27 +385,17 @@ export class ChatStreamHandler {
       turnId: persisted.turnId,
       assistantMessage: {
         messageId: persisted.assistantMessageId,
-        content: assistantText,
+        content: agentResult.assistantText,
         createdAt: persisted.createdAt,
       },
-      finishReason,
-      citations: prepared.ragContext.evidence.map((e) => ({
-        evidenceId: e.evidenceId,
-        sourceTitle: e.sourceTitle,
-        ...(e.sourceUrl ? { sourceUrl: e.sourceUrl } : {}),
-      })),
+      finishReason: agentResult.finishReason,
+      citations: agentResult.citations,
       ...(dto.options?.includeDiagnostics === true
         ? {
             diagnostics: {
-              retrievalUsed: prepared.ragContext.retrievalUsed,
-              memoryFragmentCount: prepared.memoryFragments.length,
-              retrievalMode: prepared.ragContext.retrievalMode,
-              turnRoute: prepared.turnPlan.route,
-              shouldRetrieve: prepared.turnPlan.shouldRetrieve,
-              shouldThink: prepared.turnPlan.shouldThink,
-              intent: prepared.turnPlan.intent,
-              freshness: prepared.turnPlan.freshness,
-              planReason: prepared.turnPlan.planReason,
+              ...agentResult.diagnostics,
+              personaId: prepared.identity.personaId,
+              identityVersion: prepared.identity.identityVersion,
             },
           }
         : {}),
@@ -546,13 +533,10 @@ export class ChatStreamHandler {
     }
   }
 
-  private resolveThinkingRequest(
-    dto: SubmitTurnDto,
-    plannerWantsThinking: boolean,
-  ): boolean {
+  private resolveInitialThinkingRequest(dto: SubmitTurnDto): boolean {
     if (dto.options?.forceThinking === true) return true;
     if (dto.options?.thinking === false) return false;
-    return plannerWantsThinking;
+    return false;
   }
 
   private async requestLocationFromUi(

@@ -181,6 +181,55 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
       CREATE INDEX IF NOT EXISTS idx_identity_mutation_candidates_pending
         ON identity_mutation_candidates(persona_id, decision, created_at);
+
+      CREATE TABLE IF NOT EXISTS agent_events (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL,
+        correlation_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        command TEXT,
+        summary TEXT NOT NULL,
+        payload_json TEXT,
+        created_at TEXT NOT NULL,
+        seq INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_agent_events_session_seq
+        ON agent_events(session_id, seq);
+
+      CREATE INDEX IF NOT EXISTS idx_agent_events_turn_seq
+        ON agent_events(turn_id, seq);
+
+      CREATE TABLE IF NOT EXISTS agent_plans (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL,
+        correlation_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_agent_plans_session_status
+        ON agent_plans(session_id, status, updated_at);
+
+      CREATE TABLE IF NOT EXISTS agent_plan_steps (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL REFERENCES agent_plans(id) ON DELETE CASCADE,
+        step_index INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        details TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        note TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(plan_id, step_index)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_agent_plan_steps_plan
+        ON agent_plan_steps(plan_id, step_index);
     `);
   }
 }

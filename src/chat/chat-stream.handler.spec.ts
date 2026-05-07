@@ -1,8 +1,8 @@
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import type { ServiceConfig } from '../config/config';
-import type { LlmHostService } from '../llm-host/llm-host.service';
-import type { ChatService, PreparedTurn } from './chat.service';
+import type { AgentLoopService } from './agent-loop.service';
+import type { ChatService, PreparedAgentTurn } from './chat.service';
 import { ChatStreamHandler } from './chat-stream.handler';
 
 const CONFIG: ServiceConfig = {
@@ -38,7 +38,7 @@ const CONFIG: ServiceConfig = {
   },
 };
 
-const SIMPLE_PREPARED_TURN: PreparedTurn = {
+const SIMPLE_PREPARED_TURN: PreparedAgentTurn = {
   userText: 'hello',
   imageParts: [],
   identity: {
@@ -49,33 +49,7 @@ const SIMPLE_PREPARED_TURN: PreparedTurn = {
     factCount: 1,
     reflectionCount: 0,
   },
-  turnPlan: {
-    route: 'final_answer',
-    shouldRetrieve: false,
-    shouldThink: false,
-    includeMemoryInPrompt: false,
-    includeRecentConversationInPrompt: false,
-    resolvedQueryText: 'hello',
-    intent: 'general',
-    freshness: 'medium',
-    allowedModes: [],
-    hints: [],
-    memoryFragments: [],
-    planReason: 'The turn is conversational and does not need retrieval.',
-  },
-  memoryFragments: [],
-  ragContext: {
-    retrievalUsed: false,
-    retrievalMode: 'none',
-    evidence: [],
-  },
-  llmMessages: [
-    {
-      role: 'system',
-      content: 'Core persona identity:\nYou are Gigi the Robot.',
-    },
-    { role: 'user', content: 'hello' },
-  ],
+  history: [],
   llmParts: [],
 };
 
@@ -132,33 +106,56 @@ async function waitForSentEvent(
   throw new Error(`Timed out waiting for ${eventType}`);
 }
 
-describe('ChatStreamHandler thinking routing', () => {
-  it('does not pass thinking to the model for simple turns even when legacy clients send thinking=true', async () => {
-    const assertSessionOwnership = jest.fn();
-    const prepareTurn: jest.MockedFunction<ChatService['prepareTurn']> = jest
+function makeHandler(agentRun: jest.MockedFunction<AgentLoopService['run']>): {
+  handler: ChatStreamHandler;
+  chat: Pick<ChatService, 'prepareAgentTurn' | 'persistTurn'>;
+} {
+  const prepareAgentTurn: jest.MockedFunction<ChatService['prepareAgentTurn']> =
+    jest.fn().mockReturnValue(SIMPLE_PREPARED_TURN);
+  const persistTurn: jest.MockedFunction<ChatService['persistTurn']> = jest
+    .fn()
+    .mockImplementation((args: Parameters<ChatService['persistTurn']>[0]) => ({
+      turnId: args.turnId ?? 'turn-id',
+      userMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
+      assistantMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567802',
+      createdAt: '2026-05-06T08:51:40.000Z',
+    }));
+  const chat = {
+    prepareAgentTurn,
+    persistTurn,
+  } as Pick<ChatService, 'prepareAgentTurn' | 'persistTurn'>;
+  const handler = new ChatStreamHandler(
+    CONFIG,
+    chat as ChatService,
+    {
+      run: agentRun,
+    } as unknown as AgentLoopService,
+  );
+
+  return { handler, chat };
+}
+
+function finalAgentResult(text: string) {
+  return {
+    assistantText: text,
+    finishReason: 'stop' as const,
+    citations: [],
+    diagnostics: {
+      agentSteps: 1,
+      toolCommands: 0,
+      commands: [],
+      retrievalUsed: false,
+      retrievalMode: 'none' as const,
+    },
+  };
+}
+
+describe('ChatStreamHandler agent loop routing', () => {
+  it('delegates flow control to AgentLoopService and ignores legacy thinking=true by default', async () => {
+    const agentRun: jest.MockedFunction<AgentLoopService['run']> = jest
       .fn()
-      .mockResolvedValue(SIMPLE_PREPARED_TURN);
-    const persistTurn: jest.MockedFunction<ChatService['persistTurn']> = jest
-      .fn()
-      .mockReturnValue({
-        turnId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
-        userMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
-        assistantMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567802',
-        createdAt: '2026-05-06T08:51:40.000Z',
-      });
-    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
-      .fn()
-      .mockResolvedValue({
-        finishReason: 'stop',
-        text: 'Hello! How can I help you today?',
-      });
-    const chat = {
-      assertSessionOwnership,
-      prepareTurn,
-      persistTurn,
-    } as unknown as ChatService;
-    const llm = { streamInfer } as unknown as LlmHostService;
-    const handler = new ChatStreamHandler(CONFIG, chat, llm);
+      .mockResolvedValue(finalAgentResult('Hello! How can I help you today?'));
+    const { handler } = makeHandler(agentRun);
     const ws = new FakeWebSocket();
 
     const run = handler.handle(ws as unknown as WebSocket, {
@@ -174,30 +171,15 @@ describe('ChatStreamHandler thinking routing', () => {
     ws.close();
     await run;
 
-    expect(streamInfer).toHaveBeenCalledTimes(1);
-    expect(streamInfer.mock.calls[0]?.[0].options?.thinking).toBe(false);
+    expect(agentRun).toHaveBeenCalledTimes(1);
+    expect(agentRun.mock.calls[0]?.[0].initialThinking).toBe(false);
   });
 
-  it('supports explicit forceThinking for debugging simple turns', async () => {
-    const chat = {
-      assertSessionOwnership: jest.fn(),
-      prepareTurn: jest.fn().mockResolvedValue(SIMPLE_PREPARED_TURN),
-      persistTurn: jest.fn().mockReturnValue({
-        turnId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
-        userMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
-        assistantMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567802',
-        createdAt: '2026-05-06T08:51:40.000Z',
-      }),
-    } as unknown as ChatService;
-    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
+  it('supports explicit forceThinking for the first agent step', async () => {
+    const agentRun: jest.MockedFunction<AgentLoopService['run']> = jest
       .fn()
-      .mockResolvedValue({
-        finishReason: 'stop',
-        text: 'Hello! How can I help you today?',
-      });
-    const handler = new ChatStreamHandler(CONFIG, chat, {
-      streamInfer,
-    } as unknown as LlmHostService);
+      .mockResolvedValue(finalAgentResult('Hello! How can I help you today?'));
+    const { handler } = makeHandler(agentRun);
     const ws = new FakeWebSocket();
 
     const run = handler.handle(ws as unknown as WebSocket, {
@@ -213,40 +195,14 @@ describe('ChatStreamHandler thinking routing', () => {
     ws.close();
     await run;
 
-    expect(streamInfer.mock.calls[0]?.[0].options?.thinking).toBe(true);
+    expect(agentRun.mock.calls[0]?.[0].initialThinking).toBe(true);
   });
 
-  it('keeps the session WebSocket open for multiple turns', async () => {
-    const chat = {
-      assertSessionOwnership: jest.fn(),
-      prepareTurn: jest
-        .fn()
-        .mockResolvedValueOnce(SIMPLE_PREPARED_TURN)
-        .mockResolvedValueOnce(SIMPLE_PREPARED_TURN),
-      persistTurn: jest
-        .fn()
-        .mockReturnValueOnce({
-          turnId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
-          userMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
-          assistantMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567802',
-          createdAt: '2026-05-06T08:51:40.000Z',
-        })
-        .mockReturnValueOnce({
-          turnId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567810',
-          userMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567811',
-          assistantMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567812',
-          createdAt: '2026-05-06T08:52:40.000Z',
-        }),
-    } as unknown as ChatService;
-    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
+  it('keeps the session WebSocket open for multiple agent-controlled turns', async () => {
+    const agentRun: jest.MockedFunction<AgentLoopService['run']> = jest
       .fn()
-      .mockResolvedValue({
-        finishReason: 'stop',
-        text: 'Hello! How can I help you today?',
-      });
-    const handler = new ChatStreamHandler(CONFIG, chat, {
-      streamInfer,
-    } as unknown as LlmHostService);
+      .mockResolvedValue(finalAgentResult('Hello! How can I help you today?'));
+    const { handler, chat } = makeHandler(agentRun);
     const ws = new FakeWebSocket();
 
     const run = handler.handle(ws as unknown as WebSocket, {
@@ -265,44 +221,19 @@ describe('ChatStreamHandler thinking routing', () => {
     ws.close();
     await run;
 
-    expect(chat.prepareTurn).toHaveBeenCalledTimes(2);
+    expect(chat.prepareAgentTurn).toHaveBeenCalledTimes(2);
     expect(chat.persistTurn).toHaveBeenCalledTimes(2);
-    expect(streamInfer).toHaveBeenCalledTimes(2);
+    expect(agentRun).toHaveBeenCalledTimes(2);
     expect(ws.sent.length).toBeGreaterThan(sentAfterFirstTurn);
   });
 
-  it('forwards streamed answer text verbatim without deterministic word filtering', async () => {
-    const chat = {
-      assertSessionOwnership: jest.fn(),
-      prepareTurn: jest.fn().mockResolvedValue({
-        ...SIMPLE_PREPARED_TURN,
-        userText: 'dar in bucuresti cum va fi vremea diseara?',
-      }),
-      persistTurn: jest.fn().mockReturnValue({
-        turnId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567800',
-        userMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
-        assistantMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567802',
-        createdAt: '2026-05-06T08:51:40.000Z',
-      }),
-    } as unknown as ChatService;
-    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
+  it('forwards the agent final answer verbatim without deterministic word filtering', async () => {
+    const agentRun: jest.MockedFunction<AgentLoopService['run']> = jest
       .fn()
-      .mockImplementation(async (args) => {
-        args.onEvent?.({ type: 'started', payload: {} });
-        args.onEvent?.({ type: 'chunk', payload: { text: 'Sa' } });
-        args.onEvent?.({ type: 'chunk', payload: { text: 'lut! ' } });
-        args.onEvent?.({
-          type: 'chunk',
-          payload: { text: 'Conform datelor, nu ploua imediat.' },
-        });
-        return {
-          finishReason: 'stop',
-          text: 'Salut! Conform datelor, nu ploua imediat.',
-        };
-      });
-    const handler = new ChatStreamHandler(CONFIG, chat, {
-      streamInfer,
-    } as unknown as LlmHostService);
+      .mockResolvedValue(
+        finalAgentResult('Salut! Conform datelor, nu ploua imediat.'),
+      );
+    const { handler, chat } = makeHandler(agentRun);
     const ws = new FakeWebSocket();
 
     const run = handler.handle(ws as unknown as WebSocket, {
@@ -329,11 +260,7 @@ describe('ChatStreamHandler thinking routing', () => {
       .filter((event) => event.type === 'turn.chunk')
       .map((event) => event.payload?.text);
 
-    expect(chunks).toEqual([
-      'Sa',
-      'lut! ',
-      'Conform datelor, nu ploua imediat.',
-    ]);
+    expect(chunks).toEqual(['Salut! Conform datelor, nu ploua imediat.']);
     expect(chat.persistTurn).toHaveBeenCalledWith(
       expect.objectContaining({
         assistantText: 'Salut! Conform datelor, nu ploua imediat.',

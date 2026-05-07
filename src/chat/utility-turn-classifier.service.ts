@@ -94,7 +94,7 @@ export class UtilityTurnClassifierService {
       'For greetings, thanks, acknowledgements, social check-ins, jokes, assistant identity, and ordinary chat: final_answer with no retrieval and no thinking.',
       'For underspecified requests that truly cannot proceed: clarify with no retrieval and no thinking.',
       'If retrieval is needed, resolvedQueryText must be a self-contained query using recent conversation only when needed.',
-      'Set requiresLocation=true ONLY when an accurate answer depends on the user\'s real-world location (e.g. current weather, places near me, local time, local prices, transit/directions). Set false for everything else, including general knowledge questions about a place by name. Never assume a location.',
+      "Set requiresLocation=true ONLY when an accurate answer depends on the user's real-world location (e.g. current weather, places near me, local time, local prices, transit/directions). Set false for everything else, including general knowledge questions about a place by name. Never assume a location.",
       `Current timestamp: ${input.occurredAt}`,
       `Default freshness: ${input.defaultFreshness}`,
       `Allowed retrieval modes: ${allowedModes}`,
@@ -231,6 +231,7 @@ export class UtilityTurnClassifierService {
     if (!Array.isArray(value)) return [...defaults];
     const out = value.filter(
       (mode): mode is RagAllowedMode =>
+        typeof mode === 'string' &&
         (mode === 'local_rag' || mode === 'live_web') &&
         defaults.includes(mode),
     );

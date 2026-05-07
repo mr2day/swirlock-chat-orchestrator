@@ -11,10 +11,11 @@ Built now:
 - one persistent client WebSocket: `WS /v4/chat`
 - session create/get/delete messages on that socket
 - streamed turn submission on that socket
-- Utility LLM turn classification over persistent Model Host WebSocket
-- RAG Engine integration over persistent WebSocket
+- agent-controlled turn loop over persistent Model Host WebSocket
+- RAG Engine integration as an agent command over persistent WebSocket
 - final-answer generation over persistent Model Host WebSocket
 - conversation sessions stored directly in SQLite
+- internal agent events and durable agent plans stored directly in SQLite
 
 There are no ecosystem REST endpoints.
 
@@ -49,9 +50,30 @@ Server messages include:
 - `turn.thinking`
 - `turn.chunk`
 - `turn.done`
+- `turn.location_required`
 - `health`
 - `error`
 - `heartbeat`
+
+## Agentic Turn Flow
+
+`turn.submit` now gives the assistant model explicit control over the turn
+flow. The Orchestrator sends identity, recent conversation, recent agent
+activity, active plan state, and a command manifest to the Model Host. The
+model returns either a final answer JSON frame or a command JSON frame.
+
+Supported internal commands:
+
+- `rag.retrieve`: retrieve local/live evidence through the RAG Engine.
+- `location.request`: ask the client for user location when needed.
+- `agent.continue_with_options`: continue the agent loop with changed model
+  options, currently including `thinking`.
+- `plan.create`: create a durable multi-step plan.
+- `plan.update`: update a durable plan step as work progresses.
+
+Command frames are not shown as conversation text. They are validated,
+executed, recorded in `agent_events`, and summarized back into later prompts so
+the assistant is aware of what it did for the conversation.
 
 ## Configuration
 

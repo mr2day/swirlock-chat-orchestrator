@@ -25,7 +25,11 @@ import type { InputPartDto, SubmitTurnDto } from './dto/submit-turn.dto';
 import { PersonaIdentityService } from './persona-identity.service';
 import type { PersonaIdentityCapsule } from './persona-identity.service';
 import { PromptBuilderService } from './prompt-builder.service';
-import type { ContextMemoryFragment, TurnPlan } from './turn-planner.service';
+import type {
+  ContextMemoryFragment,
+  ConversationMessage,
+  TurnPlan,
+} from './turn-planner.service';
 import { TurnPlannerService } from './turn-planner.service';
 
 interface SessionRow {
@@ -65,6 +69,14 @@ export interface PreparedTurn {
   memoryFragments: ContextMemoryFragment[];
   ragContext: RagContext;
   llmMessages: LlmMessage[];
+  llmParts: LlmInputPart[];
+}
+
+export interface PreparedAgentTurn {
+  userText: string;
+  imageParts: ChatImagePart[];
+  identity: PersonaIdentityCapsule;
+  history: ConversationMessage[];
   llmParts: LlmInputPart[];
 }
 
@@ -179,6 +191,55 @@ export class ChatService {
   }
 
   /**
+   * Loads the raw conversational context for the agent-controlled v4 turn path.
+   * This deliberately does not classify, retrieve, or decide model options.
+   */
+  prepareAgentTurn(args: {
+    sessionId: string;
+    dto: SubmitTurnDto;
+    authUserId: string;
+  }): PreparedAgentTurn {
+    const { sessionId, dto, authUserId } = args;
+    const session = this.loadSession(sessionId, authUserId);
+
+    const userText = this.extractUserText(dto.message.parts);
+    if (!userText) {
+      throw new BadRequestException(
+        'message.parts must contain at least one non-empty text part',
+      );
+    }
+
+    const imageParts = this.extractImageParts(dto.message.parts);
+    const history = this.db.connection
+      .prepare(
+        `SELECT id, session_id, turn_id, role, content, parts_json, created_at, seq
+           FROM messages WHERE session_id = ? ORDER BY seq ASC`,
+      )
+      .all(sessionId) as ConversationMessage[];
+
+    const identity = this.personaIdentity.prepareCapsule({
+      personaId: session.persona_id,
+      userId: session.user_id,
+      sessionId,
+      occurredAt: dto.message.occurredAt,
+    });
+    const llmParts: LlmInputPart[] = imageParts.map((p) => ({
+      type: 'image' as const,
+      ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
+      ...(p.imageBase64 ? { imageBase64: p.imageBase64 } : {}),
+      ...(p.mimeType ? { mimeType: p.mimeType } : {}),
+    }));
+
+    return {
+      userText,
+      imageParts,
+      identity,
+      history,
+      llmParts,
+    };
+  }
+
+  /**
    * Loads session, validates auth, normalizes input, fetches RAG context over
    * WebSocket, and builds the LLM Host input parts for the chat stream.
    */
@@ -221,7 +282,11 @@ export class ChatService {
     });
 
     let userLocation: UserLocation | undefined = args.userLocation;
-    if (!userLocation && turnPlan.requiresLocation && args.resolveUserLocation) {
+    if (
+      !userLocation &&
+      turnPlan.requiresLocation &&
+      args.resolveUserLocation
+    ) {
       const resolved = await args.resolveUserLocation();
       if (resolved) {
         userLocation = resolved;
@@ -286,12 +351,13 @@ export class ChatService {
    */
   persistTurn(args: {
     sessionId: string;
+    turnId?: string;
     parts: InputPartDto[];
     userText: string;
     occurredAt: string;
     assistantText: string;
   }): PersistedTurn {
-    const turnId = randomUUID();
+    const turnId = args.turnId ?? randomUUID();
     const userMessageId = randomUUID();
     const assistantMessageId = randomUUID();
     const createdAt = new Date().toISOString();

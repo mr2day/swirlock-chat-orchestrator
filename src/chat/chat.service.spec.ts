@@ -149,8 +149,11 @@ function makeService(
     prepareCapsule: jest.fn().mockReturnValue(TEST_IDENTITY),
     recordTurnExperience: jest.fn(),
   } as unknown as PersonaIdentityService;
+  const classify: jest.MockedFunction<
+    UtilityTurnClassifierService['classify']
+  > = jest.fn().mockResolvedValue(decision);
   const classifier = {
-    classify: jest.fn().mockResolvedValue(decision),
+    classify,
   } as unknown as UtilityTurnClassifierService;
   const service = new ChatService(
     CONFIG,
@@ -161,12 +164,12 @@ function makeService(
     new PromptBuilderService(),
   );
 
-  return { service, retrieve, classifier };
+  return { service, retrieve, classify };
 }
 
 describe('ChatService turn planning', () => {
   it('builds a final LLM prompt for a social status check without retrieval or memory', async () => {
-    const { service, retrieve, classifier } = makeService(
+    const { service, retrieve, classify } = makeService(
       [
         {
           id: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
@@ -195,7 +198,7 @@ describe('ChatService turn planning', () => {
       authUserId: 'dev-user',
     });
 
-    expect(classifier.classify).toHaveBeenCalledTimes(1);
+    expect(classify).toHaveBeenCalledTimes(1);
     expect(retrieve).not.toHaveBeenCalled();
     expect(prepared.ragContext.retrievalMode).toBe('none');
     expect(prepared.turnPlan.shouldRetrieve).toBe(false);
