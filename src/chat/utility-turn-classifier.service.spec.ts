@@ -32,7 +32,6 @@ const CONFIG: ServiceConfig = {
     freshness: 'medium',
     allowedModes: ['local_rag', 'live_web'],
     maxEvidenceChunks: 8,
-    synthesisMode: 'brief',
   },
 };
 

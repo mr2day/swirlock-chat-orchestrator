@@ -28,7 +28,6 @@ export interface RagConfig {
   freshness: 'low' | 'medium' | 'high' | 'realtime';
   allowedModes: Array<'local_rag' | 'live_web'>;
   maxEvidenceChunks: number;
-  synthesisMode: 'none' | 'brief' | 'detailed';
 }
 
 export interface HttpConfig {
@@ -116,10 +115,6 @@ function validate(c: ServiceConfig): void {
   must(
     Number.isInteger(rag?.maxEvidenceChunks) && rag.maxEvidenceChunks > 0,
     'rag.maxEvidenceChunks required',
-  );
-  must(
-    ['none', 'brief', 'detailed'].includes(String(rag?.synthesisMode)),
-    'rag.synthesisMode invalid',
   );
   must(!rag.enabled || rag.baseUrl, 'rag.baseUrl required when enabled');
 

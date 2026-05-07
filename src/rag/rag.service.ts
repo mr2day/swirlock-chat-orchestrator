@@ -175,7 +175,6 @@ export class RagService implements OnModuleInit, OnModuleDestroy {
         freshness: inquiry.freshness ?? this.cfg.rag.freshness,
         allowedModes: inquiry.allowedModes ?? this.cfg.rag.allowedModes,
         maxEvidenceChunks: this.cfg.rag.maxEvidenceChunks,
-        synthesisMode: this.cfg.rag.synthesisMode,
       },
     };
   }
