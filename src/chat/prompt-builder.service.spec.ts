@@ -54,4 +54,45 @@ describe('PromptBuilderService', () => {
     expect(turnContext).toContain('This is an ongoing conversation');
     expect(turnContext).toContain('Start with the substance of the answer.');
   });
+
+  it('keeps persona names exact for identity questions', () => {
+    const service = new PromptBuilderService();
+
+    const messages = service.buildMessages({
+      history: [],
+      userText: 'cum te cheama?',
+      occurredAt: '2026-05-07T09:05:00.000Z',
+      turnPlan: {
+        route: 'final_answer',
+        shouldRetrieve: false,
+        shouldThink: false,
+        includeMemoryInPrompt: false,
+        includeRecentConversationInPrompt: false,
+        resolvedQueryText: 'cum te cheama?',
+        intent: 'assistant_identity',
+        freshness: 'medium',
+        allowedModes: [],
+        hints: [],
+        memoryFragments: [],
+        planReason: 'Identity question.',
+      },
+      ragContext: {
+        retrievalUsed: false,
+        retrievalMode: 'none',
+        evidence: [],
+      },
+      identity: {
+        personaId: 'gigi-the-robot',
+        displayName: 'Gigi the Robot',
+        identityVersion: 2,
+        coreMessage: 'Core persona identity:\nYou are Gigi the Robot.',
+        factCount: 1,
+        reflectionCount: 0,
+      },
+    });
+
+    expect(messages[1]?.content).toContain(
+      'use the exact persona display name "Gigi the Robot"',
+    );
+  });
 });

@@ -135,6 +135,10 @@ export class PromptBuilderService {
       lines.push(
         '- Do not introduce yourself, state your name, or say who you are.',
       );
+    } else {
+      lines.push(
+        `- If answering your name, use the exact persona display name "${input.identity.displayName}" and do not translate it.`,
+      );
     }
 
     if (hasAssistantHistory) {
