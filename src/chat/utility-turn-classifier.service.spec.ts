@@ -155,6 +155,44 @@ describe('UtilityTurnClassifierService', () => {
     expect(decision.shouldThink).toBe(false);
   });
 
+  it('downgrades routine weather retrieval from retrieve_and_think to retrieve', async () => {
+    const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
+      .fn()
+      .mockResolvedValue({
+        finishReason: 'stop',
+        text: JSON.stringify({
+          route: 'retrieve_and_think',
+          shouldRetrieve: true,
+          shouldThink: true,
+          resolvedQueryText: 'weather forecast Bucharest this evening rain',
+          intent: 'weather_forecast',
+          freshness: 'high',
+          allowedModes: ['local_rag', 'live_web'],
+          hints: [],
+          includeMemoryInPrompt: true,
+          includeRecentConversationInPrompt: true,
+          confidence: 'high',
+          reason: 'Needs current weather evidence.',
+        }),
+      });
+    const service = new UtilityTurnClassifierService(CONFIG, {
+      streamInfer,
+    } as unknown as LlmHostService);
+
+    const decision = await service.classify({
+      correlationId: 'turn-weather',
+      userText: 'dar in bucuresti cum va fi vremea de acum si pana diseara?',
+      occurredAt: '2026-05-06T08:00:00.000Z',
+      history: [],
+      defaultFreshness: 'medium',
+      defaultAllowedModes: ['local_rag', 'live_web'],
+    });
+
+    expect(decision.route).toBe('retrieve');
+    expect(decision.shouldRetrieve).toBe(true);
+    expect(decision.shouldThink).toBe(false);
+  });
+
   it('routes non-English social turns to the final LLM without retrieval or thinking', async () => {
     const streamInfer: jest.MockedFunction<LlmHostService['streamInfer']> = jest
       .fn()

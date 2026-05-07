@@ -90,6 +90,7 @@ export class UtilityTurnClassifierService {
       'Allowed route values: final_answer, retrieve, retrieve_and_think, think, clarify.',
       'Set shouldRetrieve/shouldThink consistently with route.',
       'Use retrieval only for external evidence/current facts. Use thinking only for multi-step reasoning/debugging/synthesis.',
+      'For current weather, weather forecast, and current conditions requests: use retrieve, not retrieve_and_think, unless the user asks for complex planning, comparison, or analysis.',
       'For greetings, thanks, acknowledgements, social check-ins, jokes, assistant identity, and ordinary chat: final_answer with no retrieval and no thinking.',
       'For underspecified requests that truly cannot proceed: clarify with no retrieval and no thinking.',
       'If retrieval is needed, resolvedQueryText must be a self-contained query using recent conversation only when needed.',
@@ -146,6 +147,27 @@ export class UtilityTurnClassifierService {
       parsed.resolvedQueryText,
       input.userText,
     );
+    const intent = this.limitText(
+      this.stringValue(parsed.intent, 'general'),
+      80,
+    );
+    let reason = this.limitText(
+      this.stringValue(parsed.reason, 'Utility classifier selected route.'),
+      240,
+    );
+
+    if (
+      shouldRetrieve &&
+      shouldThink &&
+      this.isRoutineWeatherRetrieval(intent, resolvedQueryText)
+    ) {
+      shouldThink = false;
+      route = 'retrieve';
+      reason = this.limitText(
+        `${reason} Routine weather retrieval does not require thinking.`,
+        240,
+      );
+    }
 
     return {
       route,
@@ -160,7 +182,7 @@ export class UtilityTurnClassifierService {
         true,
       ),
       resolvedQueryText,
-      intent: this.limitText(this.stringValue(parsed.intent, 'general'), 80),
+      intent,
       freshness: this.pickEnum(
         parsed.freshness,
         FRESHNESS_VALUES,
@@ -171,11 +193,19 @@ export class UtilityTurnClassifierService {
         : [],
       hints: shouldRetrieve ? this.hints(parsed.hints) : [],
       confidence: this.pickEnum(parsed.confidence, CONFIDENCE_VALUES, 'medium'),
-      reason: this.limitText(
-        this.stringValue(parsed.reason, 'Utility classifier selected route.'),
-        240,
-      ),
+      reason,
     };
+  }
+
+  private isRoutineWeatherRetrieval(
+    intent: string,
+    queryText: string,
+  ): boolean {
+    const combined = `${intent} ${queryText}`.toLowerCase();
+
+    return /(weather|forecast|current[-_ ]?conditions|current[-_ ]?weather|meteo|vreme|prognoz|ploaie|rain|temperature|temperatur)/.test(
+      combined,
+    );
   }
 
   private fallbackDecision(input: ClassifyTurnInput): UtilityTurnDecision {
