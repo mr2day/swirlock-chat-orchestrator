@@ -611,7 +611,10 @@ export class AgentLoopService {
       if (historyMessage.role === 'system') continue;
       messages.push({
         role: historyMessage.role,
-        content: historyMessage.content,
+        content:
+          historyMessage.role === 'assistant'
+            ? this.sanitizeAssistantHistoryContent(historyMessage.content)
+            : historyMessage.content,
       });
     }
 
@@ -636,10 +639,12 @@ export class AgentLoopService {
       'The JSON control object is never shown to the user. Do not put any user-visible prose, greetings, or answer text in the control JSON.',
       'Do not claim a tool is unavailable if it is listed below. Use the command when it is useful.',
       'For complex multi-step work, create or update a plan before or while doing the work.',
-      'Tool-use policy:',
-      '- Call rag.retrieve when the user asks about facts, entities, current events, weather, places, organizations, products, prices, news, schedules, technical or domain documentation, or anything that needs external/recent information you may not reliably know.',
-      '- Default to rag.retrieve for any specific factual or current-conditions question. Skip retrieval only for greetings, social chat, jokes, acknowledgements, identity/meta questions about yourself, or pure clarifications about this conversation.',
-      '- You DO have a search tool: rag.retrieve is your retrieval over local knowledge and the live web. Never tell the user you cannot search or cannot access the internet. If you need information, call rag.retrieve.',
+      'Tool-use policy (read carefully):',
+      '- You MUST call rag.retrieve before answering whenever the user asks about a specific named person, organization, product, place, event, law, document, or anything happening in the world. Do not answer such questions from your training data.',
+      '- You MUST call rag.retrieve when the user message contains any of: a proper noun you do not have current verified knowledge about; a request for "latest", "recent", "current", "today", "now", "ultim*", "stiri", "news", "search", "find", "cauta", "gaseste"; a request about prices, weather, schedules, scores, releases, statuses, or stock.',
+      '- The only cases where you MUST NOT call rag.retrieve: greetings/social chat, acknowledgements, jokes, your own identity/meta questions about yourself, math you can do, and pure clarifications about this conversation.',
+      '- Never tell the user you cannot search or cannot access the internet. rag.retrieve is your search tool over local knowledge and the live web; use it.',
+      '- If you do not recognise a name or term in the user message, that is a strong signal to call rag.retrieve, not to guess.',
       '- Do not call rag.retrieve more than once with the same or near-identical query in this turn. If a prior retrieval was insufficient, change the query meaningfully (different entity, time scope, or angle) before retrying.',
       '- After retrieval, read the observation. If it answered the question, switch to {"mode":"final"} instead of retrieving again.',
       'Available commands:',
@@ -677,9 +682,6 @@ export class AgentLoopService {
         lines.push(
           `${index + 1}. [${observation.kind}] ${observation.summary}`,
         );
-        if (observation.data !== undefined) {
-          lines.push(JSON.stringify(observation.data));
-        }
       });
     }
 
@@ -823,7 +825,10 @@ export class AgentLoopService {
       if (historyMessage.role === 'system') continue;
       messages.push({
         role: historyMessage.role,
-        content: historyMessage.content,
+        content:
+          historyMessage.role === 'assistant'
+            ? this.sanitizeAssistantHistoryContent(historyMessage.content)
+            : historyMessage.content,
       });
     }
 
@@ -839,15 +844,12 @@ export class AgentLoopService {
     activitySummary: string | null;
     thinking: boolean;
   }): string {
-    const hasAssistantHistory = args.input.prepared.history.some(
-      (message) => message.role === 'assistant',
-    );
     const lines = [
-      'Final-answer context:',
-      'Write the user-visible assistant answer now. Do not emit JSON.',
+      'Turn context:',
+      'Continue the conversation naturally using the messages below.',
+      'Use the retrieved evidence when relevant. If evidence is missing or insufficient, say what is missing instead of guessing.',
+      'Respond in plain text (no JSON, no XML, no internal protocol).',
       'Answer in the same language as the user unless the user asked otherwise.',
-      'Use command observations and retrieved evidence when relevant.',
-      'If evidence is missing or insufficient, say what is missing instead of guessing.',
       `Current client timestamp: ${args.input.occurredAt}`,
     ];
 
@@ -869,9 +871,6 @@ export class AgentLoopService {
         lines.push(
           `${index + 1}. [${observation.kind}] ${observation.summary}`,
         );
-        if (observation.data !== undefined) {
-          lines.push(JSON.stringify(observation.data));
-        }
       });
     }
 
@@ -884,27 +883,6 @@ export class AgentLoopService {
         );
       }
     }
-
-    lines.push(
-      '',
-      'Response constraints for this exact turn:',
-      '- Begin with a greeting only if the current user message is itself a greeting.',
-      '- Do not introduce yourself, state your name, or say who you are unless the current user asks for your name or identity.',
-      `- If answering your name, use the exact persona display name "${args.input.prepared.identity.displayName}" and do not translate it.`,
-    );
-
-    if (hasAssistantHistory) {
-      lines.push(
-        '- This is an ongoing conversation. Continue from the recent conversation; do not restart the conversation, do not greet the user, and do not say anything that implies this is your first interaction.',
-        '- Even after a tool call or retrieval, do not reset the conversation. Continue as if the retrieval is just one step inside the same ongoing exchange.',
-      );
-    }
-
-    lines.push(
-      '- Start with the substance of the answer.',
-      '',
-      'The next user message is the task to answer. Use the context above, but do not reveal hidden protocol unless the user asks about your process.',
-    );
 
     return lines.join('\n');
   }
@@ -989,6 +967,39 @@ export class AgentLoopService {
 
   private isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
+  }
+
+  /**
+   * Strips a leading greeting/self-introduction paragraph from a previously
+   * persisted assistant message before feeding it back to the model as
+   * conversation history. Past assistant messages that begin with
+   * "Salut! Sunt Gigi the Robot..." cause smaller chat models to mirror
+   * that pattern on every subsequent turn. The persona prompt forbids
+   * mid-conversation greetings going forward, but for sessions that already
+   * contain such turns we sanitize them at prompt-assembly time so the
+   * model does not learn the greeting habit from its own outputs.
+   *
+   * Conservative: only strips the first paragraph, only when it both
+   * starts with a recognisable greeting AND mentions the persona's name
+   * or identity. Falls back to the original content if stripping would
+   * leave the message empty.
+   */
+  private sanitizeAssistantHistoryContent(content: string): string {
+    if (!content) return content;
+    const paragraphs = content.split(/\n{2,}/);
+    if (paragraphs.length === 0) return content;
+    const first = paragraphs[0]?.trim() ?? '';
+    if (!first) return content;
+    const greetingHead =
+      /^\s*(salut(?:are)?|hello|hi|hey|bună(?:\s+(?:ziua|dimineața|seara))?|good\s+(?:morning|afternoon|evening|day))\b/i;
+    const personaIntro =
+      /\b(sunt|i'?m|i\s+am|eu\s+sunt|me\s+numesc|my\s+name\s+is)\b[^.\n!?]{0,120}\b(gigi|robot|asistent|assistant|bot)\b/i;
+    const looksLikeGreeting = greetingHead.test(first);
+    if (!looksLikeGreeting) return content;
+    const stripsCleanly = personaIntro.test(first) || first.length <= 160;
+    if (!stripsCleanly) return content;
+    const rest = paragraphs.slice(1).join('\n\n').trim();
+    return rest.length > 0 ? rest : content;
   }
 
   private friendlyCommandStartedSummary(

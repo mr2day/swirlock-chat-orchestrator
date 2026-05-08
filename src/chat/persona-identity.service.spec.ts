@@ -63,7 +63,7 @@ describe('PersonaIdentityService', () => {
       occurredAt: '2026-05-07T12:00:00.000Z',
     });
 
-    expect(capsule.identityVersion).toBe(2);
+    expect(capsule.identityVersion).toBe(3);
     expect(capsule.coreMessage).not.toMatch(/\bSwirlock\b/i);
     expect(capsule.coreMessage).not.toMatch(/\becosystem\b/i);
   });
