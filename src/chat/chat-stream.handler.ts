@@ -330,6 +330,17 @@ export class ChatStreamHandler {
         onFinalChunk: (text: string) => {
           send('turn.chunk', { text });
         },
+        onClassifying: (info) => {
+          send('turn.classifying', { step: info.step });
+        },
+        onAgentActivity: (event) => {
+          send('turn.agent', {
+            phase: event.phase,
+            ...(event.command ? { command: event.command } : {}),
+            summary: event.summary,
+            ...(event.data !== undefined ? { data: event.data } : {}),
+          });
+        },
         onModelEvent: (evt) => {
           switch (evt.type) {
             case 'queued':

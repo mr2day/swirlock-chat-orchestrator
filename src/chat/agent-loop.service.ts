@@ -73,6 +73,13 @@ export interface AgentLoopResult {
   };
 }
 
+export interface AgentActivityEvent {
+  command?: string;
+  phase: 'classifying' | 'command_started' | 'command_completed' | 'plan';
+  summary: string;
+  data?: unknown;
+}
+
 export interface RunAgentLoopInput {
   sessionId: string;
   turnId: string;
@@ -84,6 +91,8 @@ export interface RunAgentLoopInput {
   onModelEvent?: (event: LlmStreamEvent) => void;
   onFinalChunk?: (text: string) => void;
   onRagStreamEvent?: (event: RetrievalStreamEvent) => void;
+  onClassifying?: (info: { step: number }) => void;
+  onAgentActivity?: (event: AgentActivityEvent) => void;
   resolveUserLocation?: () => Promise<UserLocation | null>;
   abortSignal?: AbortSignal;
 }
@@ -119,6 +128,7 @@ export class AgentLoopService {
 
     for (let step = 1; step <= MAX_AGENT_STEPS; step++) {
       this.throwIfAborted(input.abortSignal);
+      input.onClassifying?.({ step });
       const result = await this.llm.streamInfer({
         correlationId: input.correlationId,
         messages: this.buildAgentMessages({
@@ -268,16 +278,23 @@ export class AgentLoopService {
   }): Promise<AgentCommandResult> {
     const command = args.frame.command!;
     const commandArgs = args.frame.arguments ?? {};
+    const requestSummary = args.frame.reason
+      ? this.limitText(args.frame.reason, 300)
+      : `The assistant agent requested ${command}.`;
     this.trace.recordEvent({
       sessionId: args.input.sessionId,
       turnId: args.input.turnId,
       correlationId: args.input.correlationId,
       eventType: 'agent.command.requested',
       command,
-      summary: args.frame.reason
-        ? this.limitText(args.frame.reason, 300)
-        : `The assistant agent requested ${command}.`,
+      summary: requestSummary,
       payload: commandArgs,
+    });
+    args.input.onAgentActivity?.({
+      command,
+      phase: 'command_started',
+      summary: this.friendlyCommandStartedSummary(command, commandArgs),
+      data: { commandArgs },
     });
 
     try {
@@ -386,6 +403,18 @@ export class AgentLoopService {
         evidence: ragContext.evidence.slice(0, 8),
       },
     });
+    input.onAgentActivity?.({
+      command: 'rag.retrieve',
+      phase: 'command_completed',
+      summary:
+        ragContext.evidence.length > 0
+          ? `Found ${ragContext.evidence.length} source${ragContext.evidence.length === 1 ? '' : 's'}.`
+          : 'No sources found.',
+      data: {
+        retrievalMode: ragContext.retrievalMode,
+        evidenceCount: ragContext.evidence.length,
+      },
+    });
 
     return {
       ragContext,
@@ -480,6 +509,12 @@ export class AgentLoopService {
       summary: `Created plan "${plan.title}" with ${plan.steps.length} step(s).`,
       payload: plan,
     });
+    input.onAgentActivity?.({
+      command: 'plan.create',
+      phase: 'plan',
+      summary: `Plan: ${plan.title} (${plan.steps.length} step${plan.steps.length === 1 ? '' : 's'}).`,
+      data: { planId: plan.planId, stepCount: plan.steps.length },
+    });
 
     return {
       observation: {
@@ -524,6 +559,17 @@ export class AgentLoopService {
       command: 'plan.update',
       summary: `Updated plan "${plan.title}".`,
       payload: plan,
+    });
+    const totalSteps = plan.steps.length;
+    const completedSteps = plan.steps.filter(
+      (planStep) =>
+        planStep.status === 'completed' || planStep.status === 'cancelled',
+    ).length;
+    input.onAgentActivity?.({
+      command: 'plan.update',
+      phase: 'plan',
+      summary: `Plan progress: ${completedSteps}/${totalSteps} step${totalSteps === 1 ? '' : 's'} done.`,
+      data: { planId: plan.planId, completedSteps, totalSteps },
     });
 
     return {
@@ -793,14 +839,15 @@ export class AgentLoopService {
     activitySummary: string | null;
     thinking: boolean;
   }): string {
+    const hasAssistantHistory = args.input.prepared.history.some(
+      (message) => message.role === 'assistant',
+    );
     const lines = [
       'Final-answer context:',
       'Write the user-visible assistant answer now. Do not emit JSON.',
       'Answer in the same language as the user unless the user asked otherwise.',
       'Use command observations and retrieved evidence when relevant.',
       'If evidence is missing or insufficient, say what is missing instead of guessing.',
-      'Begin with a greeting only if the current user message is itself a greeting.',
-      'Do not introduce yourself, state your name, or say who you are unless the current user asks for your name or identity.',
       `Current client timestamp: ${args.input.occurredAt}`,
     ];
 
@@ -839,6 +886,22 @@ export class AgentLoopService {
     }
 
     lines.push(
+      '',
+      'Response constraints for this exact turn:',
+      '- Begin with a greeting only if the current user message is itself a greeting.',
+      '- Do not introduce yourself, state your name, or say who you are unless the current user asks for your name or identity.',
+      `- If answering your name, use the exact persona display name "${args.input.prepared.identity.displayName}" and do not translate it.`,
+    );
+
+    if (hasAssistantHistory) {
+      lines.push(
+        '- This is an ongoing conversation. Continue from the recent conversation; do not restart the conversation, do not greet the user, and do not say anything that implies this is your first interaction.',
+        '- Even after a tool call or retrieval, do not reset the conversation. Continue as if the retrieval is just one step inside the same ongoing exchange.',
+      );
+    }
+
+    lines.push(
+      '- Start with the substance of the answer.',
       '',
       'The next user message is the task to answer. Use the context above, but do not reveal hidden protocol unless the user asks about your process.',
     );
@@ -926,6 +989,29 @@ export class AgentLoopService {
 
   private isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
+  }
+
+  private friendlyCommandStartedSummary(
+    command: string,
+    commandArgs: Record<string, unknown>,
+  ): string {
+    if (command === 'rag.retrieve') {
+      const query = this.stringArg(commandArgs.query);
+      return query ? `Searching: "${query}"` : 'Searching for sources';
+    }
+    if (command === 'location.request') {
+      return 'Asking for your location';
+    }
+    if (command === 'agent.continue_with_options') {
+      return 'Adjusting model options';
+    }
+    if (command === 'plan.create') {
+      return 'Creating a plan';
+    }
+    if (command === 'plan.update') {
+      return 'Updating the plan';
+    }
+    return `Running command: ${command}`;
   }
 
   private normalizeRetrieveKey(
