@@ -607,14 +607,28 @@ export class AgentLoopService {
       content: this.buildAgentControlPrompt(args),
     });
 
-    for (const historyMessage of prepared.history.slice(-12)) {
+    // For the control step, replace each prior assistant message with an
+    // objective, language-agnostic summary of what the orchestrator did in
+    // that turn (commands run, evidence counts, whether a final answer
+    // was produced). User messages stay verbatim. This keeps full history
+    // length while removing the model's own prior subjective claims
+    // (failure admissions, hedges, "maybe you mean..."), which would
+    // otherwise mislead the control-step's tool-use decision.
+    for (const historyMessage of prepared.history) {
       if (historyMessage.role === 'system') continue;
+      if (historyMessage.role === 'assistant') {
+        messages.push({
+          role: 'assistant',
+          content: this.trace.summarizePriorAssistantTurn(
+            args.input.sessionId,
+            historyMessage.turn_id,
+          ),
+        });
+        continue;
+      }
       messages.push({
         role: historyMessage.role,
-        content:
-          historyMessage.role === 'assistant'
-            ? this.sanitizeAssistantHistoryContent(historyMessage.content)
-            : historyMessage.content,
+        content: historyMessage.content,
       });
     }
 

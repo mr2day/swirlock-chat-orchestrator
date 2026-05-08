@@ -85,6 +85,137 @@ export class AgentTraceService {
       );
   }
 
+  /**
+   * Builds an objective, language-agnostic summary of what happened in a
+   * specific prior assistant turn, derived from `agent_events` for that
+   * turn_id. Used by the agent control step to substitute into history
+   * in place of the raw assistant prose, so the control LLM's tool-use
+   * decision is grounded in the *actions* taken last time, not in the
+   * subjective claims the assistant model wrote ("I couldn't find...",
+   * "maybe you mean..."). The final-answer step still receives the
+   * original prose verbatim.
+   *
+   * Returns a short bracketed marker like
+   * `[prior-turn: rag.retrieve("Grindeanu...")=>6 evidence; final answer delivered]`,
+   * or `[prior-turn: final answer delivered]` if no commands ran, or
+   * `[prior-turn: no orchestrator trace available]` for legacy turns
+   * predating the agent_events table.
+   */
+  summarizePriorAssistantTurn(sessionId: string, turnId: string): string {
+    const rows = this.db.connection
+      .prepare(
+        `SELECT event_type, command, summary, payload_json
+           FROM agent_events
+          WHERE session_id = ? AND turn_id = ?
+          ORDER BY seq ASC`,
+      )
+      .all(sessionId, turnId) as Array<{
+      event_type: string;
+      command: string | null;
+      summary: string;
+      payload_json: string | null;
+    }>;
+
+    if (rows.length === 0) {
+      return '[prior-turn: no orchestrator trace available]';
+    }
+
+    const actionParts: string[] = [];
+    let producedFinalAnswer = false;
+    let aborted = false;
+
+    for (const row of rows) {
+      if (row.event_type === 'agent.command.completed' && row.command) {
+        actionParts.push(this.formatCompletedCommand(row));
+        continue;
+      }
+      if (row.event_type === 'agent.command.failed' && row.command) {
+        actionParts.push(`${row.command}=>failed`);
+        continue;
+      }
+      if (row.event_type === 'agent.command.skipped' && row.command) {
+        actionParts.push(`${row.command}=>skipped(duplicate)`);
+        continue;
+      }
+      if (row.event_type === 'agent.final.completed') {
+        producedFinalAnswer = true;
+      }
+      if (row.event_type === 'agent.loop.aborted') {
+        aborted = true;
+      }
+    }
+
+    const segments: string[] = [];
+    if (actionParts.length > 0) {
+      segments.push(`actions: ${actionParts.join('; ')}`);
+    }
+    if (producedFinalAnswer) {
+      segments.push('final answer delivered');
+    }
+    if (aborted) {
+      segments.push('turn aborted');
+    }
+    if (segments.length === 0) {
+      segments.push('no recorded actions');
+    }
+    return `[prior-turn: ${segments.join('; ')}]`;
+  }
+
+  private formatCompletedCommand(row: {
+    command: string | null;
+    payload_json: string | null;
+  }): string {
+    const command = row.command ?? '?';
+    const payload = this.safeParseJson(row.payload_json);
+    if (command === 'rag.retrieve') {
+      const query =
+        typeof payload?.query === 'string'
+          ? this.truncateText(payload.query, 80)
+          : null;
+      const evidenceCount =
+        typeof payload?.evidenceCount === 'number'
+          ? payload.evidenceCount
+          : null;
+      const queryPart = query ? `query="${query}"` : '';
+      const evidencePart =
+        evidenceCount !== null ? `=>${evidenceCount} evidence` : '';
+      return `rag.retrieve(${queryPart})${evidencePart}`;
+    }
+    if (command === 'plan.create') {
+      const stepCount =
+        typeof payload?.steps === 'object' &&
+        Array.isArray((payload as { steps?: unknown[] }).steps)
+          ? (payload as { steps: unknown[] }).steps.length
+          : null;
+      return `plan.create(${stepCount ?? '?'} steps)`;
+    }
+    if (command === 'plan.update') {
+      return 'plan.update';
+    }
+    if (command === 'location.request') {
+      return 'location.request';
+    }
+    return command;
+  }
+
+  private safeParseJson(value: string | null): Record<string, unknown> | null {
+    if (!value) return null;
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private truncateText(value: string, maxLength: number): string {
+    const normalized = value.replace(/\s+/g, ' ').trim();
+    if (normalized.length <= maxLength) return normalized;
+    return `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
+  }
+
   recentActivitySummary(sessionId: string, limit = 12): string | null {
     const rows = this.db.connection
       .prepare(
