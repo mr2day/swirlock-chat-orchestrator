@@ -38,7 +38,6 @@ type AgentMode = 'final' | 'command';
 
 interface AgentFrame {
   mode: AgentMode;
-  content?: string;
   command?: string;
   arguments?: Record<string, unknown>;
   reason?: string;
@@ -101,6 +100,7 @@ export class AgentLoopService {
     const observations: AgentObservation[] = [];
     const commands: string[] = [];
     const ragContexts: RagContext[] = [];
+    const retrievedQueries = new Map<string, AgentObservation>();
     let thinking = input.initialThinking;
     let userLocation = input.initialUserLocation;
     let toolCommands = 0;
@@ -163,7 +163,6 @@ export class AgentLoopService {
           ragContexts,
           activePlanSummary: this.trace.activePlanSummary(input.sessionId),
           activitySummary: this.trace.recentActivitySummary(input.sessionId),
-          finalIntent: frame.content,
           thinking,
         });
         if (!finalResult.text.trim()) {
@@ -202,6 +201,32 @@ export class AgentLoopService {
         continue;
       }
 
+      if (frame.command === 'rag.retrieve') {
+        const cachedKey = this.normalizeRetrieveKey(frame.arguments);
+        const cachedObservation = cachedKey
+          ? retrievedQueries.get(cachedKey)
+          : undefined;
+        if (cachedObservation) {
+          commands.push(frame.command);
+          observations.push({
+            kind: 'rag.retrieve.duplicate',
+            summary: `Skipped duplicate rag.retrieve for the same query already run this turn. Reuse the prior observation: ${cachedObservation.summary}`,
+            data: cachedObservation.data,
+          });
+          this.trace.recordEvent({
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            correlationId: input.correlationId,
+            eventType: 'agent.command.skipped',
+            command: frame.command,
+            summary:
+              'Duplicate rag.retrieve with the same query was skipped within this turn.',
+            payload: { key: cachedKey },
+          });
+          continue;
+        }
+      }
+
       toolCommands++;
       commands.push(frame.command);
       const commandResult = await this.executeCommand({
@@ -210,6 +235,11 @@ export class AgentLoopService {
         userLocation,
       });
       observations.push(commandResult.observation);
+
+      if (frame.command === 'rag.retrieve') {
+        const cacheKey = this.normalizeRetrieveKey(frame.arguments);
+        if (cacheKey) retrievedQueries.set(cacheKey, commandResult.observation);
+      }
 
       if (commandResult.ragContext) {
         ragContexts.push(commandResult.ragContext);
@@ -551,11 +581,17 @@ export class AgentLoopService {
     const lines = [
       'Agentic orchestration protocol:',
       'You can control the orchestrator by returning exactly one JSON object and no prose outside JSON.',
-      'Use {"mode":"final","content":"brief private answer intent"} when you are ready for the orchestrator to send a normal streaming final-answer infer message over the persistent Model Host socket.',
+      'Use {"mode":"final"} when you are ready for the orchestrator to send a normal streaming final-answer infer message over the persistent Model Host socket. Do not write the user-visible answer here; the streaming final-answer step will do that.',
       'Use {"mode":"command","command":"...","arguments":{...},"reason":"..."} when you need the orchestrator to act first.',
-      'The JSON control object is not shown to the user. final.content is private intent/context for the streaming final-answer infer message, not user-visible text.',
+      'The JSON control object is never shown to the user. Do not put any user-visible prose, greetings, or answer text in the control JSON.',
       'Do not claim a tool is unavailable if it is listed below. Use the command when it is useful.',
       'For complex multi-step work, create or update a plan before or while doing the work.',
+      'Tool-use policy:',
+      '- Call rag.retrieve when the user asks about facts, entities, current events, weather, places, organizations, products, prices, news, schedules, technical or domain documentation, or anything that needs external/recent information you may not reliably know.',
+      '- Default to rag.retrieve for any specific factual or current-conditions question. Skip retrieval only for greetings, social chat, jokes, acknowledgements, identity/meta questions about yourself, or pure clarifications about this conversation.',
+      '- You DO have a search tool: rag.retrieve is your retrieval over local knowledge and the live web. Never tell the user you cannot search or cannot access the internet. If you need information, call rag.retrieve.',
+      '- Do not call rag.retrieve more than once with the same or near-identical query in this turn. If a prior retrieval was insufficient, change the query meaningfully (different entity, time scope, or angle) before retrying.',
+      '- After retrieval, read the observation. If it answered the question, switch to {"mode":"final"} instead of retrieving again.',
       'Available commands:',
       '- rag.retrieve: search local/live evidence. arguments: { "query": string, "freshness"?: "low"|"medium"|"high"|"realtime", "allowedModes"?: ["local_rag"|"live_web"], "intent"?: string, "hints"?: [{ "kind": "entity"|"time_reference"|"preference"|"disambiguation"|"constraint", "text": string }] }.',
       '- location.request: ask the UI for user location when the answer depends on the user real-world location. arguments: {}.',
@@ -601,7 +637,7 @@ export class AgentLoopService {
       '',
       'Response constraints:',
       '- Return valid JSON only.',
-      '- Keep final.content brief. The final-answer infer message will write the full user-visible answer.',
+      '- Do not write any user-visible answer text in this control JSON. The final-answer infer step writes the full user-visible answer.',
       '- If you used a command, you are aware you used it. You may truthfully say so if the user asks.',
       '- Do not expose internal JSON, command names, or hidden protocol unless the user asks about your process.',
     );
@@ -614,7 +650,6 @@ export class AgentLoopService {
     if (!parsed) {
       return {
         mode: 'final',
-        content: rawText,
         reason: 'Model returned non-JSON text; treated as final answer.',
       };
     }
@@ -623,7 +658,6 @@ export class AgentLoopService {
     if (mode === 'final') {
       return {
         mode,
-        content: this.stringArg(parsed.content) ?? '',
         reason: this.stringArg(parsed.reason),
       };
     }
@@ -658,7 +692,6 @@ export class AgentLoopService {
     ragContexts: RagContext[];
     activePlanSummary: string | null;
     activitySummary: string | null;
-    finalIntent?: string;
     thinking: boolean;
   }): Promise<{
     finishReason: 'stop' | 'length' | 'error';
@@ -672,7 +705,6 @@ export class AgentLoopService {
       summary:
         'The assistant agent handed off to a normal streaming final-answer infer message on the persistent Model Host socket.',
       payload: {
-        finalIntent: args.finalIntent ?? null,
         observationCount: args.observations.length,
       },
     });
@@ -718,7 +750,6 @@ export class AgentLoopService {
     ragContexts: RagContext[];
     activePlanSummary: string | null;
     activitySummary: string | null;
-    finalIntent?: string;
     thinking: boolean;
   }): LlmMessage[] {
     const { prepared } = args.input;
@@ -756,7 +787,6 @@ export class AgentLoopService {
     ragContexts: RagContext[];
     activePlanSummary: string | null;
     activitySummary: string | null;
-    finalIntent?: string;
     thinking: boolean;
   }): string {
     const lines = [
@@ -769,13 +799,6 @@ export class AgentLoopService {
       'Do not introduce yourself, state your name, or say who you are unless the current user asks for your name or identity.',
       `Current client timestamp: ${args.input.occurredAt}`,
     ];
-
-    if (args.finalIntent?.trim()) {
-      lines.push(
-        '',
-        `Private answer intent from control step: ${args.finalIntent.trim()}`,
-      );
-    }
 
     if (args.activitySummary) {
       lines.push(
@@ -899,6 +922,23 @@ export class AgentLoopService {
 
   private isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
+  }
+
+  private normalizeRetrieveKey(
+    commandArgs: Record<string, unknown> | undefined,
+  ): string | null {
+    const query = this.stringArg(commandArgs?.query);
+    if (!query) return null;
+    const freshness = this.enumArg(
+      commandArgs?.freshness,
+      FRESHNESS_VALUES,
+      'medium',
+    );
+    const allowedModes = this.allowedModes(commandArgs?.allowedModes)
+      .slice()
+      .sort()
+      .join(',');
+    return `${query.toLowerCase().replace(/\s+/g, ' ').trim()}|${freshness}|${allowedModes}`;
   }
 
   private throwIfAborted(abortSignal?: AbortSignal): void {
