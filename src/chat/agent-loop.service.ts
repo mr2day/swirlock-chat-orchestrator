@@ -139,7 +139,11 @@ export class AgentLoopService {
           ollama: { temperature: 0 },
         },
         abortSignal: input.abortSignal,
-        onEvent: input.onModelEvent,
+        onEvent: (evt) => {
+          if (evt.type === 'queued') {
+            input.onModelEvent?.(evt);
+          }
+        },
       });
 
       const frame = this.parseAgentFrame(result.text);
