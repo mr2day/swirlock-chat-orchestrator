@@ -10,6 +10,17 @@ this codebase.
 
 Audience: any engineer or agent picking this work up cold.
 
+> **Long-term direction.** The chatbot is one form factor; the
+> system is being grown into a general agentic intelligence
+> (planning, tool use, reflection, world models, robotic and digital
+> surfaces). Read [VISION.md](VISION.md) before deleting anything
+> that looks unused — many primitives are deliberately preserved for
+> future surfaces. Read [DECISION_PIPELINE.md](DECISION_PIPELINE.md)
+> for the next planned refactor (Phase F): the agent loop in the chat
+> pipeline gets replaced by a linear utilitarian-prompt pipeline,
+> while the underlying agentic primitives (plan storage, trace,
+> shared SQLite, oracle pattern) are explicitly preserved.
+
 Required reading before starting:
 
 - `../swirlock-chatbot-contracts/docs/versions/v5/README.md`

@@ -191,26 +191,31 @@ model is asked to memorize.
 
 | Component | Status |
 | --- | --- |
-| `ConversationFlowService` | **Stays**, becomes the only orchestration class. Drops the agent-loop indirection. |
+| `ConversationFlowService` | **Stays**, becomes the only chat-pipeline orchestration class. Drops the agent-loop indirection. |
 | `ConversationPromptBuilderService` | **Stays as-is.** Final-answer prompt is the only "free-breathing" call. |
 | `ConversationHistoryService` | **Stays as-is.** |
 | `PersonaIdentityService` | **Stays as-is.** |
-| `AgentTraceService` | **Stays.** Trace events still useful for debugging; the event types simplify (one row per decision instead of per agent step). |
+| `AgentTraceService` | **Stays in full.** Trace event types simplify, but every method (including plan storage and `summarizePriorAssistantTurn`) is preserved — they're load-bearing for the agentic future, see [VISION.md](VISION.md). |
 | `ChatSessionService` | **Stays as-is.** |
 | `ChatStreamHandler` | **Stays mostly as-is.** Still parses envelopes, holds the in-flight-turn lock, owns the location mailbox. The `processTurn` method calls the new flow service unchanged. |
 | `RagService` | **Stays as-is.** |
 | `GeocodingService` | **Stays as-is.** Now consumed during the location-resolution step of the pipeline. |
 | `FragmenterClientService` | **Stays as-is.** |
 | `LlmHostService` | **Stays as-is.** Used for both utilitarian and final-answer calls. |
-| `ControlLoopService` | **Removed.** |
-| `ControlPromptBuilderService` | **Removed.** |
+| `agent_plans` / `agent_plan_steps` SQL migrations | **Stay.** Storage layer for future agent mode. |
+| `agent_events` SQL migration | **Stays.** Every decision is still traced. |
+| `ControlLoopService` | **Removed** from chat pipeline. The iterative-loop *pattern* is rebuilt later in `AgentFlowService` against the same DecisionsService primitives — see [VISION.md](VISION.md). |
+| `ControlPromptBuilderService` | **Removed.** No huge JSON-mode control prompt anymore. |
 | `control-frame-parser.ts` | **Removed.** |
-| `commands/*.command.ts` (5 files) | **Removed.** Their actions become inline steps in `ConversationFlowService` or methods on the new `DecisionsService`. |
+| `commands/*.command.ts` (5 files) | **Removed.** These were the JSON-frame tool-calling implementations. Their *actions* survive — RAG, location, geocoding, plan storage are all still called by deterministic code in the pipeline. |
 | `commands/agent-command.types.ts`, `commands/command-utils.ts` | **Removed.** |
 
-Net file delta: `−10` files (control + commands), `+3` files
-(decisions service, decision prompts, signal codec). The chat module
-shrinks notably.
+Net file delta in the chatbot tree: `−10` files (control + commands),
+`+3` files (decisions service, decision prompts, signal codec). The
+removed code was the chatbot-specific implementation of agentic
+primitives; the primitives themselves (storage, trace, plan tables,
+oracle pattern) are intact and ready for a future
+`AgentFlowService` to consume.
 
 New layout under `src/chat/`:
 
@@ -367,24 +372,61 @@ The `agent_events` table stays. Event types simplify:
 - `decision.evidenceSufficient.completed` (only if iteration runs)
 - `final.streamed.completed`
 
-`summarizePriorAssistantTurn` (used by the control prompt today)
-becomes unnecessary — there is no control prompt. The function and
-the agent-trace machinery around it can be retired in a follow-up
-cleanup.
+`summarizePriorAssistantTurn` is no longer called by the chat
+pipeline (there is no control prompt to substitute it into), but the
+function **stays on `AgentTraceService`**. It is exactly the kind of
+mechanical trace-to-history transform that an agentic surface will
+need when it replays past actions during reflection. Don't delete it.
 
 ## What about plans, multi-step retrieval, agent autonomy?
 
-The current code has `plan.create` / `plan.update` commands and
-within-turn dedup of `rag.retrieve`. None of this saw real use in
-production. The proposal **drops them**.
+This refactor is **chatbot-pipeline-only**. The agentic primitives
+that live in the codebase today are not all going away — only the
+chat-specific implementations of them are.
 
-If we ever need iterative retrieval, we add it explicitly: after the
-first `rag.retrieve`, call `evidenceSufficient`, and if the answer is
-no, call `generateSearchQuery` again with a "refine: previous query
-returned no results" hint. One conditional retry, not an open agent
-loop. If we ever need multi-step planning, we re-introduce it as a
-distinct decision branch with the same shape — never as an emergent
-behavior of a model parsing a long prompt.
+What this refactor removes from the **chatbot's hot path**:
+
+- The agent loop that iterates up to 8 times per turn (replaced by
+  the linear pipeline above).
+- The 5 JSON-frame *commands*: `rag.retrieve`, `location.request`,
+  `plan.create`, `plan.update`, `agent.continue_with_options`. Their
+  underlying *actions* survive — RAG is still called, location is
+  still requested, plans can still be written — but the dispatch
+  happens through deterministic code, not through the LLM emitting
+  JSON command frames.
+- Within-turn `rag.retrieve` dedup (because the chat pipeline doesn't
+  repeat retrievals).
+- The huge JSON-mode control prompt.
+
+What this refactor **explicitly preserves** for the long agentic
+arc (see [VISION.md](VISION.md)):
+
+- The `agent_plans` and `agent_plan_steps` tables and their
+  migrations.
+- All plan-storage methods on `AgentTraceService` (`createPlan`,
+  `updatePlanStep`, `activePlanSummary`, `latestActivePlanId`,
+  `planSnapshot`, `completePlanIfFinished`).
+- The `agent_events` trace table and `recordEvent` /
+  `recentActivitySummary` machinery — every decision is still
+  traced; the Fragmenter and a future agent-mode reflection loop
+  will mine it.
+- `summarizePriorAssistantTurn` (storage method on
+  `AgentTraceService`).
+- The `DecisionsService` oracle layer is designed to grow: chat mode
+  uses ~5 methods; agent mode will add more (`shouldPlan`,
+  `selectTool`, `reflectOnResult`, `composePlanRevision`, …) as
+  surfaces require them. The signaling format (`⟦…⟧`) and the
+  per-method prompt shape are stable.
+
+If, inside the chat pipeline, we ever need iterative retrieval, we
+add it explicitly: after the first `rag.retrieve`, call
+`evidenceSufficient`, and if the answer is no, call
+`generateSearchQuery` again with a refinement hint. One conditional
+retry, not an open agent loop.
+
+The full iterative agent loop returns later, in its own pipeline
+(`AgentFlowService`), driving a different surface — see
+[VISION.md](VISION.md) for the sketch and the rationale.
 
 ## Migration plan
 
