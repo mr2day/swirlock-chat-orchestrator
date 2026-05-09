@@ -195,15 +195,16 @@ model is asked to memorize.
 | `ConversationPromptBuilderService` | **Stays as-is.** Final-answer prompt is the only "free-breathing" call. |
 | `ConversationHistoryService` | **Stays as-is.** |
 | `PersonaIdentityService` | **Stays as-is.** |
-| `AgentTraceService` | **Stays in full.** Trace event types simplify, but every method (including plan storage and `summarizePriorAssistantTurn`) is preserved — they're load-bearing for the agentic future, see [VISION.md](VISION.md). |
+| `AgentTraceService` | **Renamed** to `DecisionTraceService`. The orchestrator-flow events it records are decisions, not agent actions; the `agent_*` prefix should be reserved for the future agent surface. Plan-management methods (`createPlan`, `updatePlanStep`, etc.) ride along for now and will move to a dedicated `AgentPlanService` when agent mode lands. `summarizePriorAssistantTurn` is preserved (no longer called by the chat pipeline, will be reused by the agent pipeline during reflection). |
+| `agent_events` SQL table | **Renamed** to `decision_events`. Same data, semantically correct name. F1 ships the rename. |
 | `ChatSessionService` | **Stays as-is.** |
-| `ChatStreamHandler` | **Stays mostly as-is.** Still parses envelopes, holds the in-flight-turn lock, owns the location mailbox. The `processTurn` method calls the new flow service unchanged. |
+| `ChatStreamHandler` | **Stays mostly as-is.** Still parses envelopes, holds the in-flight-turn lock, owns the location mailbox. New: emits `turn.phase.*` events for utilitarian decisions. |
 | `RagService` | **Stays as-is.** |
 | `GeocodingService` | **Stays as-is.** Now consumed during the location-resolution step of the pipeline. |
 | `FragmenterClientService` | **Stays as-is.** |
 | `LlmHostService` | **Stays as-is.** Used for both utilitarian and final-answer calls. |
-| `agent_plans` / `agent_plan_steps` SQL migrations | **Stay.** Storage layer for future agent mode. |
-| `agent_events` SQL migration | **Stays.** Every decision is still traced. |
+| `agent_plans` / `agent_plan_steps` SQL migrations | **Stay.** Storage layer for future agent mode — these *are* agent primitives, the prefix is correct. |
+| `CappingService` (new) | **New module.** All output-cap policy lives here, not in flow services. Today every method returns `undefined` (no cap). See [CAPPING.md](CAPPING.md). |
 | `ControlLoopService` | **Removed** from chat pipeline. The iterative-loop *pattern* is rebuilt later in `AgentFlowService` against the same DecisionsService primitives — see [VISION.md](VISION.md). |
 | `ControlPromptBuilderService` | **Removed.** No huge JSON-mode control prompt anymore. |
 | `control-frame-parser.ts` | **Removed.** |
@@ -211,9 +212,10 @@ model is asked to memorize.
 | `commands/agent-command.types.ts`, `commands/command-utils.ts` | **Removed.** |
 
 Net file delta in the chatbot tree: `−10` files (control + commands),
-`+3` files (decisions service, decision prompts, signal codec). The
-removed code was the chatbot-specific implementation of agentic
-primitives; the primitives themselves (storage, trace, plan tables,
+`+5` files (decisions service, decision prompts, signal codec, capping
+service, capping module). The removed code was the chatbot-specific
+implementation of agentic primitives; the primitives themselves
+(storage, trace, plan tables,
 oracle pattern) are intact and ready for a future
 `AgentFlowService` to consume.
 
@@ -224,6 +226,9 @@ src/chat/
   chat-stream.handler.ts                    (unchanged)
   chat-session.service.ts                   (unchanged)
   chat.module.ts                            (smaller provider list)
+  capping/                                   ← new (see CAPPING.md)
+    capping.module.ts                       (new — exports CappingService)
+    capping.service.ts                      (new — typed hooks; all return undefined today)
   conversation/
     conversation-flow.service.ts            (rewritten; drives the linear pipeline)
     conversation-prompt-builder.service.ts  (unchanged)
@@ -238,7 +243,7 @@ src/chat/
   persona/
     persona-identity.service.ts             (unchanged)
   trace/
-    agent-trace.service.ts                  (unchanged; event types simplify)
+    decision-trace.service.ts               (renamed from agent-trace.service.ts; event types simplify)
   dto/                                      (unchanged)
 ```
 
@@ -249,12 +254,25 @@ Every method follows the same pattern:
 ```ts
 async <name>(args): Promise<<typed result>>
 {
-  1. build a tiny prompt (text mode, temperature 0, ~80–200 tokens out)
-  2. call LlmHostService.streamInfer (no thinking)
-  3. parse the response with one of the two regexes
-  4. return a typed value, or a safe default + log on parse failure
+  1. build a tiny prompt
+  2. ask CappingService.forUtilitarianDecision({ messages }) for an
+     output cap (today: undefined; future: input-proportional —
+     see CAPPING.md)
+  3. call LlmHostService.streamInfer (text mode, temperature 0,
+     no thinking, no max_tokens unless the capping service supplied
+     one) and stream the tokens back to the UI as turn.phase.token
+     events under a stable phase ID
+  4. parse the accumulated buffer with one of the two regexes
+  5. return a typed value, or a safe default + log on parse failure
 }
 ```
+
+**No safety timeouts.** The Vanamonde LLM is local and tightly
+prompted; on the empirical evidence it returns the marker in well
+under a second. Adding a timeout before we have observed misbehavior
+would be a premature safety rail with its own failure mode. The
+capping module exists exactly so a future, measured intervention
+can flip on without touching the call sites — see CAPPING.md.
 
 Initial method set, in order of dependency. **Each method is a pure
 function of its one or two narrow inputs.** Adding parameters is the
