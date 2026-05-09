@@ -104,7 +104,7 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Sends one inference request over the persistent upstream Model Host
-   * WebSocket at /v4/model. Callers that need live UI updates provide
+   * WebSocket at /v5/model. Callers that need live UI updates provide
    * `onEvent`; callers such as the Utility turn classifier can omit it and just
    * read the assembled response text.
    */
@@ -510,7 +510,7 @@ class PersistentModelHostSocket {
       this.baseUrl
         .replace(/^http:/i, 'ws:')
         .replace(/^https:/i, 'wss:')
-        .replace(/\/$/, '') + '/v4/model'
+        .replace(/\/$/, '') + '/v5/model'
     );
   }
 
