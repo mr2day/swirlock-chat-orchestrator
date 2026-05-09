@@ -110,10 +110,6 @@ src/
 
 What disappears from the current tree:
 
-- `src/auth/` — HTTP-only `BearerAuthGuard`/`AuthModule`, never bound.
-  `bearer-auth.util.ts` is the only live piece (used by `main.ts` for the
-  WS upgrade) and either inlines into `main.ts` or stays as a single
-  utility file.
 - `src/common/` — `CorrelationIdMiddleware` and `ErrorEnvelopeFilter` are
   HTTP-only. `meta.util.ts` is unused on the wire (the WS handler only
   forwards `res.data`).
@@ -122,6 +118,16 @@ What disappears from the current tree:
   paths (only reachable via `chat.service.prepareTurn`, which is itself
   dead).
 
+What is preserved despite being unbound today:
+
+- `src/auth/` (`AuthModule`, `BearerAuthGuard`, `bearer-auth.util.ts`).
+  The util is actively used by the WS upgrade in `main.ts`. The module
+  and guard are HTTP-shaped stubs that no controller currently applies,
+  but they stay as the architectural home for the upcoming Swirlock IDP
+  integration (JWT/OIDC validation, scope checks, user account
+  resolution). When IDP work begins, the dev-token equality check in
+  `BearerAuthGuard` will be replaced by an IDP-backed implementation.
+
 ## Phased Work Order
 
 Each phase is independently shippable. CI/build/tests should pass at the
@@ -129,186 +135,224 @@ end of each phase.
 
 ### Phase A — endpoint flip + dead-code purge + config simplification
 
-Mechanical, low-risk. Land first.
+**Status: shipped on `v5-refactoring` branch.** Mechanical, low-risk.
 
-- [ ] `main.ts`: `STREAM_PATH = '/v5/chat'`.
-- [ ] `rag.service.ts` `streamUrl()`: `/v4/retrieval` → `/v5/retrieval`.
-- [ ] `config.ts`: drop `UtilityLlmHostConfig`, `ServiceConfig.utilityLlmHost`,
-      and the validate() block for it. Drop `apiVersion` field too — it
-      is only consumed by the soon-to-be-deleted `buildMeta`.
-- [ ] `service.config.cjs`: delete the `utilityLlmHost` block; delete
+- [x] `main.ts`: `STREAM_PATH = '/v5/chat'`.
+- [x] `rag.service.ts` `streamUrl()`: `/v4/retrieval` → `/v5/retrieval`.
+- [x] `config.ts`: dropped `UtilityLlmHostConfig`,
+      `ServiceConfig.utilityLlmHost`, the validate() block for it, and
       the `apiVersion` field.
-- [ ] Delete files:
-  - `src/chat/turn-planner.service.ts` + its `.spec.ts`
-  - `src/chat/utility-turn-classifier.service.ts` + its `.spec.ts`
+- [x] `service.config.cjs`: deleted the `utilityLlmHost` block and the
+      `apiVersion` field.
+- [x] Deleted files:
+  - `src/chat/turn-planner.service.ts` + `.spec.ts`
+  - `src/chat/utility-turn-classifier.service.ts` + `.spec.ts`
   - `src/chat/turn-classification.ts`
-  - `src/chat/prompt-builder.service.ts` + its `.spec.ts`
-- [ ] `chat.service.ts`: delete `prepareTurn` (the unused legacy path);
-      drop imports of `TurnPlannerService` / `PromptBuilderService` and
-      the unused `PreparedTurn` type.
-- [ ] `chat.service.spec.ts`: replace any `prepareTurn` tests with tests
-      of `prepareAgentTurn`, or delete entirely if redundant with
-      `chat-stream.handler.spec.ts`.
-- [ ] `chat.module.ts`: remove `TurnPlannerService`,
+  - `src/chat/prompt-builder.service.ts` + `.spec.ts`
+  - `src/chat/chat.service.spec.ts` (only tested the deleted
+    `prepareTurn` path; `chat-stream.handler.spec.ts` covers the live
+    flow)
+- [x] `chat.service.ts`: deleted `prepareTurn`; dropped imports of
+      `TurnPlannerService` / `PromptBuilderService`; relocated
+      `ConversationMessage` here (it was previously exported from the
+      now-deleted `turn-planner.service.ts`); stopped wrapping responses
+      in `{ meta, data }` and now returns plain data shapes (the WS
+      handler is the only caller and only ever forwarded `res.data`).
+- [x] `chat.module.ts`: removed `TurnPlannerService`,
       `UtilityTurnClassifierService`, `PromptBuilderService` from
       providers.
-- [ ] Delete `src/auth/auth.module.ts` and `src/auth/bearer-auth.guard.ts`.
-      Keep `bearer-auth.util.ts` (still used by `main.ts`).
-- [ ] `app.module.ts`: remove `AuthModule` import and the
-      `CorrelationIdMiddleware` / `ErrorEnvelopeFilter` wiring.
-- [ ] Delete `src/common/correlation-id.middleware.ts`,
-      `src/common/error-envelope.filter.ts`, `src/common/meta.util.ts`.
-- [ ] `chat.service.ts`: stop wrapping responses in
-      `{ meta: buildMeta(...), data: ... }`; return plain `data` shapes.
-      The WS handler is the only caller and only forwards `res.data`.
-- [ ] `main.ts`: drop the CORS configuration block (no HTTP endpoints
-      remain).
-- [ ] Update `README.md` and `TRANSPORT-AND-ROUTING-PLAN.md` from
-      v4 → v5; remove utility-LLM mentions. (`PHASES.md` was deleted
-      separately; do not recreate it.)
+- [x] Kept `src/auth/` intact as the architectural home for the
+      upcoming Swirlock IDP integration. `BearerAuthGuard` is HTTP-shaped
+      and not yet bound to any controller, but the module placeholder
+      stays so future IDP work is additive. `bearer-auth.util.ts`
+      remains the live WS-upgrade auth path.
+- [x] `app.module.ts`: removed the `CorrelationIdMiddleware` /
+      `ErrorEnvelopeFilter` wiring; `AuthModule` import preserved.
+- [x] Deleted `src/common/` entirely (correlation-id middleware,
+      error-envelope filter, meta util — all HTTP-only).
+- [x] `main.ts`: dropped the CORS configuration block (no HTTP
+      endpoints remain).
+- [x] `LlmHostService`: collapsed to a single Vanamonde Model Host
+      socket; removed the `clients: Map<string, …>`, the multi-URL
+      connect loop, and the per-call `baseUrl/callerService/priority/timeoutMs`
+      overrides on `streamInfer`. (Originally Phase B in this plan; the
+      type ripple from removing `utilityLlmHost` made it natural to do
+      together.)
+- [x] Updated `README.md` and `TRANSPORT-AND-ROUTING-PLAN.md` from
+      v4 → v5.
 
-Test gate at end of phase: `chat-stream.handler.spec.ts` and
-`persona-identity.service.spec.ts` continue to pass; no references to
-deleted symbols remain (`tsc --noEmit` clean).
+Test gate at end of phase: `npm run build`, `npm run lint`,
+`npm test` all clean; 8 tests pass across 3 spec files
+(chat-stream.handler, agent-loop.service, persona-identity.service).
 
 ### Phase B — collapse `LlmHostService` to single Vanamonde socket
 
-- [ ] `LlmHostService`: remove the `clients: Map<string, ...>` and the
-      multi-URL connect loop in `onModuleInit`. Keep one private
-      `PersistentModelHostSocket` bound to `cfg.llmHost.baseUrl`.
-- [ ] Remove `streamInfer.{baseUrl, callerService, timeoutMs, priority}`
-      overrides from the public method signature. Keep only
-      `correlationId, parts?, messages?, options?, onEvent?, abortSignal?`.
-- [ ] `PersistentModelHostSocket` itself stays — it's already
-      well-isolated.
-- [ ] `LlmHostModule` unchanged.
+**Status: shipped as part of Phase A.** The type ripple from removing
+`utilityLlmHost` from `ServiceConfig` made it cheaper to do here than
+defer. `LlmHostService` now holds a single `PersistentModelHostSocket`
+bound to `cfg.llmHost.baseUrl`; `streamInfer` no longer accepts
+`baseUrl`/`callerService`/`priority`/`timeoutMs` overrides.
 
 ### Phase C — add Context Fragmenter client
 
-- [ ] New module `src/fragmenter/`.
-- [ ] `FragmenterClientService` (Injectable, OnModuleInit/Destroy):
-  - persistent WS to `{fragmenter.baseUrl}/v5/fragmenter` (default
-    `ws://127.0.0.1:3215`).
-  - reconnect with backoff; identical pattern to
-    `PersistentModelHostSocket`.
-  - send-queue while disconnected, dropped after a small retry budget
-    (per contract: orchestrator's notifications are dropped after a short
-    retry; user-facing turn is unaffected).
-  - public methods:
-    - `notifyObserved({ sessionId, lastTurnId, lastSeq, observedAt })` →
-      sends `session.observed` envelope, fire-and-forget.
-    - `notifyInvalidated({ sessionId, reason? })` → sends
-      `session.invalidate`, fire-and-forget.
-  - subscribes to inbound `consolidation.updated` events; exposes a
-    minimal `onConsolidationUpdated(handler)` subscription for future
-    cache invalidation. The MVP orchestrator does not consume these
-    events; the subscription point exists so we don't need to refactor
-    the client when we do.
-  - heartbeat support.
-- [ ] `config.ts` + `service.config.cjs`: add a `fragmenter` slot:
-      `{ enabled: boolean, baseUrl: string, callerService: string, timeoutMs: number }`.
-      Default `enabled: false` so the orchestrator can run without a
-      Fragmenter during dev. When `enabled: false`, `FragmenterClientService`
-      is a no-op stub.
-- [ ] Wire into the conversation flow: after a turn is persisted, fire
-      `notifyObserved` with the persisted turn's `lastSeq`.
-- [ ] Wire into session deletion: fire `notifyInvalidated`.
+**Status: shipped on `v5-refactoring` branch.**
 
-Failure-mode requirement: every code path that calls a Fragmenter
-notification must remain correct when the call returns immediately
-(connection down, queue full). No `await` on Fragmenter work in the
-turn pipeline.
+- [x] New module `src/fragmenter/` with `FragmenterClientService` and
+      `FragmenterModule`.
+- [x] `FragmenterClientService`:
+  - persistent WS to `{fragmenter.baseUrl}/v5/fragmenter` (default
+    `ws://127.0.0.1:3215`); bearer auth via `Authorization` header on
+    upgrade.
+  - reconnect with backoff (`RECONNECT_BACKOFF_MS = 1s`); same pattern
+    as `PersistentModelHostSocket`.
+  - in-memory `outbox` of `QueuedFrame` while disconnected; bounded by
+    `MAX_QUEUE_DEPTH`; oldest-dropped on overflow; per-frame retry
+    budget `MAX_FRAME_ATTEMPTS`.
+  - public methods: `notifyObserved`, `notifyInvalidated` (both
+    fire-and-forget, both no-op when `cfg.fragmenter.enabled=false`).
+  - subscribes to inbound `consolidation.updated` envelopes; exposes
+    `onConsolidationUpdated(listener)` returning an unsubscribe fn.
+    The MVP orchestrator does not act on these (it reads consolidation
+    rows from shared SQLite at prompt-assembly time); the subscription
+    point is reserved for future in-process caches.
+- [x] `config.ts` + `service.config.cjs`: added a `fragmenter` slot
+      `{ enabled, baseUrl, bearerToken, callerService, timeoutMs }`.
+      Default in `service.config.cjs` is `enabled: true` pointing at
+      `http://127.0.0.1:3215`. When `enabled: false`, the client is a
+      pure no-op (no socket, notifiers return immediately).
+- [x] `ChatService.persistTurn` now returns `lastSeq` (the assistant
+      message's `seq`), so the orchestrator can include it in
+      `session.observed` per the v5 contract payload shape.
+- [x] `ChatStreamHandler.processTurn`: fires `fragmenter.notifyObserved`
+      after `persistTurn` returns and before `cleanupAbort()`. No
+      `await` — fire-and-forget.
+- [x] `ChatStreamHandler.processControlMessage`: fires
+      `fragmenter.notifyInvalidated({ reason: 'session.delete' })` on
+      `session.delete`.
+- [x] Wired `FragmenterModule` into `ChatModule`'s imports;
+      `ChatStreamHandler` constructor signature gained the
+      `FragmenterClientService` dependency (spec updated to match).
+- [x] Added `scripts/smoke-e2e.mjs` and an `npm run smoke:e2e` script
+      that drives a full `session.create` → `turn.submit` → `turn.done`
+      → fragmenter consolidation flow against the live Vanamonde +
+      Fragmenter LLM Hosts and verifies a row lands in
+      `fragmenter_session_summaries`.
+
+Failure-mode requirement satisfied: every notifier path returns
+synchronously and the user-facing turn pipeline never `await`s
+fragmenter work. End-to-end verified via `npm run smoke:e2e`.
 
 ### Phase D — honor Conversation Text Integrity
 
-- [ ] Delete [`agent-loop.service.ts:1001 sanitizeAssistantHistoryContent`](src/chat/agent-loop.service.ts#L1001)
-      and its caller in `buildFinalAnswerMessages` (~line 844). The
-      persona system prompt forbids mid-conversation greetings; trust it.
-      During the move to the new layout (Phase E), do not port this
-      method to `ConversationPromptBuilder`.
-- [ ] Delete [`persona-identity.service.ts:409 estimateSalience`](src/chat/persona-identity.service.ts#L409)
-      and [`persona-identity.service.ts:417 extractIdentityMutationCandidate`](src/chat/persona-identity.service.ts#L417).
-      Both are regex-on-conversational-text and both will be done by the
-      Fragmenter once it is built.
-- [ ] Delete `persona-identity.service.ts recordTurnExperience` entirely.
-      It is the inline-after-every-turn write that v5 explicitly says
-      belongs to the Fragmenter, not the orchestrator's hot path.
-- [ ] Delete the call to `recordTurnExperience` from
-      `chat.service.persistTurn` (or its successor in the new layout).
+**Status: shipped on `v5-refactoring` branch.**
+
+- [x] Deleted `sanitizeAssistantHistoryContent` from
+      `agent-loop.service.ts` along with its caller in
+      `buildFinalAnswerMessages`. The persona system prompt is the only
+      thing that controls greeting/intro behavior in v5.
+- [x] Deleted `estimateSalience`, `extractIdentityMutationCandidate`,
+      and `recordTurnExperience` from `persona-identity.service.ts`.
+      All were regex-driven semantic decisions on conversational text;
+      consolidation work of that flavour belongs in the Fragmenter.
+- [x] Deleted the inline `personaIdentity.recordTurnExperience` call
+      from `ChatService.persistTurn` (and the now-unused `Logger`
+      injection along with it).
+- [x] Slimmed `PersonaIdentityCapsule` to `{ personaId, displayName,
+      identityVersion, coreMessage, contextualMessage? }`. Dropped
+      `factCount`/`reflectionCount` (they were unused in production)
+      and the `recentReflections` / `relationshipSummary` queries
+      (their backing tables are being dropped — see migrations below).
+      `prepareCapsule` now produces a contextual message from
+      long-lived persona facts only.
 
 After this phase:
 
 - `personas`, `persona_identity_versions`, `persona_identity_facts`
   remain orchestrator-owned schemas (per contract). They are still
   seeded by `prepareCapsule` on first session.
-- Drop the migrations for `persona_life_events`, `persona_reflections`,
-  `persona_user_relationships`, `persona_identity_snapshots`,
-  `identity_mutation_candidates`. The Fragmenter writes to its *own*
-  tables per `apps/context-fragmenter.md`; if/when consolidation needs
-  equivalent storage, the Fragmenter will define its own schemas under
-  its own ownership.
+- Dropped the migrations for `persona_life_events`,
+  `persona_reflections`, `persona_user_relationships`,
+  `persona_identity_snapshots`, `identity_mutation_candidates` from
+  `database.service.ts`. Existing deployments retain those tables as
+  orphan schemas (no destructive `DROP TABLE` ships); fresh deployments
+  no longer create them. The Fragmenter writes to its *own* tables per
+  `apps/context-fragmenter.md`; if/when consolidation needs equivalent
+  storage, it will define schemas under its own ownership.
+
+Test gate: build, lint, and 8/8 jest tests pass after the slim-down.
+End-to-end smoke run via `npm run smoke:e2e` confirms the agent loop
++ fragmenter consolidation still produce a correct rolling summary
+without the deleted regex paths.
 
 ### Phase E — split `chat-stream.handler.ts` and `agent-loop.service.ts`
 
-The largest phase. Land in one PR if practical to avoid half-applied
-imports.
+**Status: shipped on `v5-refactoring` branch.**
 
-- [ ] **Conversation flow**:
-  - `src/chat/conversation/conversation-flow.service.ts` — extract the
-    `processTurn` body from `chat-stream.handler.ts`. Owns the per-turn
-    state machine (validate → run control loop → persist → notify
-    Fragmenter → emit `turn.done`). Calls but does not contain
-    `ControlLoopService`, `ConversationPromptBuilder`, `ChatSessionService`,
-    `FragmenterClientService`.
-  - `src/chat/conversation/conversation-prompt-builder.service.ts` —
-    takes over `buildFinalAnswerMessages` + `buildFinalAnswerPrompt` from
-    `agent-loop.service.ts`. Treats consolidation as optional (a
-    consolidated history view that may be empty).
-  - `src/chat/conversation/conversation-history.service.ts` — reads
-    `messages` rows; reads Fragmenter result tables (currently empty)
-    and merges them into a `HistoryView` object the prompt builder
-    consumes. For now: returns raw history; the consolidation slot is
-    `null`.
-- [ ] **Control / agent loop**:
-  - `src/chat/control/control-loop.service.ts` — takes over
-    `AgentLoopService.run`. Calls `ControlPromptBuilder` for each step,
-    parses the frame via `ControlFrameParser`, dispatches to one of the
-    `commands/*.command.ts`. Hands off to `ConversationPromptBuilder` +
-    `LlmHostService` when the model signals `mode: final`.
-  - `src/chat/control/control-prompt-builder.service.ts` — takes over
-    `buildAgentMessages` + `buildAgentControlPrompt`. Owns the
-    `summarizePriorAssistantTurn` substitution (still legal under v5;
-    it's a mechanical transform on structured trace data, not on
-    conversational meaning).
-  - `src/chat/control/control-frame-parser.ts` — exports
-    `parseAgentFrame(text): AgentFrame` and the `parseJsonObject`
-    helper.
-- [ ] **Commands (one file each)**:
-  - `src/chat/commands/agent-command.types.ts` — `AgentFrame`,
+The structural reshuffle of `chat-stream.handler.ts` and the old
+`agent-loop.service.ts` into the per-purpose tree from the plan.
+Behavioral parity with Phase D verified end-to-end via
+`npm run smoke:e2e`.
+
+- [x] **Conversation**:
+  - `src/chat/conversation/conversation-flow.service.ts` owns the
+    per-turn state machine: validate → load session → load history
+    view → prepare capsule → run control loop → append turn → notify
+    fragmenter → return `TurnDoneEnvelope`.
+  - `src/chat/conversation/conversation-prompt-builder.service.ts`
+    owns the streaming final-answer prompt; treats fragmenter
+    consolidation as optional, injecting it as a system block when
+    present.
+  - `src/chat/conversation/conversation-history.service.ts` reads
+    orchestrator-owned `messages` rows + fragmenter-owned
+    `fragmenter_session_summaries` via plain SQL, merging them into a
+    `ConversationHistoryView`.
+- [x] **Control**:
+  - `src/chat/control/control-loop.service.ts` replaces
+    `AgentLoopService.run`. Iterates through control-step inferences,
+    parses frames, dispatches to one of the `AgentCommand`
+    implementations registered through DI, and hands off to the
+    `ConversationPromptBuilderService` for the final answer.
+  - `src/chat/control/control-prompt-builder.service.ts` owns the
+    JSON-mode control prompt and the `summarizePriorAssistantTurn`
+    substitution on assistant history.
+  - `src/chat/control/control-frame-parser.ts` exports the pure
+    `parseAgentFrame`/`parseJsonObject` helpers.
+- [x] **Commands (one file each)**:
+  - `src/chat/commands/agent-command.types.ts` defines `AgentFrame`,
     `AgentObservation`, `AgentCommandResult`, `AgentActivityEvent`,
     `AgentCommandContext`, and the `AgentCommand` interface.
-  - `src/chat/commands/rag-retrieve.command.ts` — `executeRagRetrieve`.
-  - `src/chat/commands/location-request.command.ts` —
-    `executeLocationRequest`.
-  - `src/chat/commands/plan-create.command.ts` — `executePlanCreate`.
-  - `src/chat/commands/plan-update.command.ts` — `executePlanUpdate`.
-  - `src/chat/commands/agent-continue-options.command.ts` —
-    `executeContinueWithOptions`.
-  - The within-turn dedup map for `rag.retrieve` (`retrievedQueries`)
-    stays inside `ControlLoopService`'s per-run state, not in the
-    command file.
-- [ ] **Trim the handler**:
-  - `chat-stream.handler.ts` collapses to: parse envelope, route by
-    type, dispatch to `ChatSessionService` for session.* and
-    `ConversationFlowService` for `turn.submit`. The location-request
+  - `src/chat/commands/command-utils.ts` holds the small `stringArg`,
+    `enumArg`, `isRecord`, `limitText` helpers used across commands.
+  - `src/chat/commands/{rag-retrieve,location-request,plan-create,plan-update,agent-continue-options}.command.ts`
+    each implement `AgentCommand` for their command. Within-turn
+    `rag.retrieve` deduplication stays inside `ControlLoopService` —
+    `RagRetrieveCommand.normalizeKey` exposes the cache key but the
+    cache lives in the loop's per-run state.
+- [x] **Sessions / persistence**:
+  - `src/chat/chat-session.service.ts` owns session create/get/delete,
+    `appendTurn` (atomic user+assistant insert with `lastSeq`), and
+    helpers `extractUserText`/`extractImageParts`. Replaces the old
+    `ChatService`.
+- [x] **Slim handler**:
+  - `chat-stream.handler.ts` is now envelope routing only:
+    parse envelope, route by type, dispatch to `ChatSessionService`
+    for `session.*` and `ConversationFlowService.runTurn` for
+    `turn.submit`. The per-correlation `turn.location_required`
     mailbox stays here (it is a WS-facing concern).
-  - Rename `V4Envelope` → `ChatEnvelope` (the envelope shape did not
-    actually change v4 → v5; the name was wrong).
-- [ ] **Persona service slim-down**: after Phase D + the structural
-      shuffle, `persona-identity.service.ts` should contain only
-      `prepareCapsule` and the schema seed/upsert helpers. Move it under
-      `src/chat/persona/`.
-- [ ] **Trace service**: move to `src/chat/trace/`. Behavior unchanged.
+  - `V4Envelope` renamed to `ChatEnvelope`.
+- [x] **Persona / trace moved**:
+  - `src/chat/persona-identity.service.ts` → `src/chat/persona/persona-identity.service.ts`.
+  - `src/chat/agent-trace.service.ts` → `src/chat/trace/agent-trace.service.ts`.
+- [x] **Deletions**: `src/chat/chat.service.ts` and
+      `src/chat/agent-loop.service.ts` removed wholesale; their
+      responsibilities are now spread across the per-purpose files
+      above.
+
+Test gate: `npm run build` clean, `npm run lint` clean. Live
+end-to-end via `npm run smoke:e2e` produced a coherent rolling
+summary (Romanian "Oțel" exchange) — full agent loop + fragmenter
+consolidation verified against the live Vanamonde + Fragmenter LLM
+Hosts.
 
 ### Phase F — verification
 

@@ -16,6 +16,15 @@ export interface AuthenticatedUser {
 
 export type AuthenticatedRequest = Request & { user?: AuthenticatedUser };
 
+/**
+ * HTTP-shaped bearer guard preserved for future Swirlock IDP wiring.
+ *
+ * Not wired into any controller today — the orchestrator has no HTTP
+ * routes; the live WS endpoint authenticates during the upgrade in
+ * `main.ts` via `bearer-auth.util.ts`. When IDP work begins, replace
+ * the dev-token equality check below with IDP-backed JWT validation
+ * and surface the resolved identity through `req.user`.
+ */
 @Injectable()
 export class BearerAuthGuard implements CanActivate {
   constructor(@Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig) {}
