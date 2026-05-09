@@ -19,7 +19,10 @@ Audience: any engineer or agent picking this work up cold.
 > for the next planned refactor (Phase F): the agent loop in the chat
 > pipeline gets replaced by a linear utilitarian-prompt pipeline,
 > while the underlying agentic primitives (plan storage, trace,
-> shared SQLite, oracle pattern) are explicitly preserved.
+> shared SQLite, oracle pattern) are explicitly preserved. Read
+> [CAPPING.md](CAPPING.md) before touching anything in
+> `src/chat/capping/` — its hooks return `undefined` today by
+> design, and the architecture depends on them staying in place.
 
 Required reading before starting:
 
