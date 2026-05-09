@@ -26,6 +26,19 @@ export interface RagConfig {
   maxEvidenceChunks: number;
 }
 
+export interface FragmenterConfig {
+  /**
+   * When false, the orchestrator skips opening a socket to the
+   * Context Fragmenter. The user-facing turn pipeline is unaffected;
+   * this is the dev/standalone mode.
+   */
+  enabled: boolean;
+  baseUrl: string | null;
+  bearerToken: string;
+  callerService: string;
+  timeoutMs: number;
+}
+
 export interface ServiceConfig {
   serviceName: string;
   host: string;
@@ -34,6 +47,7 @@ export interface ServiceConfig {
   database: DatabaseConfig;
   llmHost: LlmHostConfig;
   rag: RagConfig;
+  fragmenter: FragmenterConfig;
 }
 
 export const SERVICE_CONFIG = Symbol('SERVICE_CONFIG');
@@ -81,4 +95,20 @@ function validate(c: ServiceConfig): void {
     'rag.maxEvidenceChunks required',
   );
   must(!rag.enabled || rag.baseUrl, 'rag.baseUrl required when enabled');
+
+  if (!c.fragmenter)
+    throw new Error('service.config.cjs invalid: fragmenter required');
+  const frag = c.fragmenter;
+  must(typeof frag.enabled === 'boolean', 'fragmenter.enabled required');
+  must(frag.callerService, 'fragmenter.callerService required');
+  must(typeof frag.timeoutMs === 'number', 'fragmenter.timeoutMs required');
+  must(
+    !frag.enabled || frag.baseUrl,
+    'fragmenter.baseUrl required when enabled',
+  );
+  must(
+    !frag.enabled ||
+      (typeof frag.bearerToken === 'string' && frag.bearerToken.length > 0),
+    'fragmenter.bearerToken required when enabled',
+  );
 }

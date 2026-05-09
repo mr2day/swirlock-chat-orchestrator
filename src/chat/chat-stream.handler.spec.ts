@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
+import type { FragmenterClientService } from '../fragmenter/fragmenter-client.service';
 import type { AgentLoopService } from './agent-loop.service';
 import type { ChatService, PreparedAgentTurn } from './chat.service';
 import { ChatStreamHandler } from './chat-stream.handler';
@@ -85,16 +86,25 @@ function makeHandler(agentRun: jest.MockedFunction<AgentLoopService['run']>): {
       userMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567801',
       assistantMessageId: '0196f9e8-71b6-7dc0-8d2c-b0b3c4567802',
       createdAt: '2026-05-06T08:51:40.000Z',
+      lastSeq: 2,
     }));
   const chat = {
     prepareAgentTurn,
     persistTurn,
   } as Pick<ChatService, 'prepareAgentTurn' | 'persistTurn'>;
+  const fragmenter: Pick<
+    FragmenterClientService,
+    'notifyObserved' | 'notifyInvalidated'
+  > = {
+    notifyObserved: jest.fn(),
+    notifyInvalidated: jest.fn(),
+  };
   const handler = new ChatStreamHandler(
     chat as ChatService,
     {
       run: agentRun,
     } as unknown as AgentLoopService,
+    fragmenter as FragmenterClientService,
   );
 
   return { handler, chat };

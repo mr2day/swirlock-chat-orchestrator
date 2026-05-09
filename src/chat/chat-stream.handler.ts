@@ -8,6 +8,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
+import { FragmenterClientService } from '../fragmenter/fragmenter-client.service';
 import type { RetrievalStreamEvent } from '../rag/rag.service';
 import type { UserLocation } from '../rag/rag.service';
 import { AgentLoopService } from './agent-loop.service';
@@ -64,6 +65,7 @@ export class ChatStreamHandler {
   constructor(
     private readonly chat: ChatService,
     private readonly agentLoop: AgentLoopService,
+    private readonly fragmenter: FragmenterClientService,
   ) {}
 
   async handle(ws: WebSocket, ctx: ConnectionContext): Promise<void> {
@@ -220,6 +222,10 @@ export class ChatStreamHandler {
       const data = this.chat.deleteSession({
         sessionId,
         authUserId: ctx.authUserId,
+      });
+      this.fragmenter.notifyInvalidated({
+        sessionId,
+        reason: 'session.delete',
       });
       this.send(ws, {
         type: 'session.deleted',
@@ -384,6 +390,18 @@ export class ChatStreamHandler {
       failTurn(500, 'Failed to persist turn');
       return;
     }
+
+    // Fire-and-forget notification to the Context Fragmenter. The
+    // user-facing turn pipeline does not wait for any reply per v5
+    // contract; if the fragmenter is unavailable the notification is
+    // dropped and the next turn simply finds whatever consolidation
+    // was already in place (possibly none).
+    this.fragmenter.notifyObserved({
+      sessionId,
+      lastTurnId: persisted.turnId,
+      lastSeq: persisted.lastSeq,
+      observedAt: persisted.createdAt,
+    });
 
     cleanupAbort();
     send('turn.done', {

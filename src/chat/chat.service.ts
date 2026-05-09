@@ -55,6 +55,13 @@ export interface PersistedTurn {
   userMessageId: string;
   assistantMessageId: string;
   createdAt: string;
+  /**
+   * `seq` of the assistant message that was just inserted. Surfaced so
+   * the orchestrator can include it in the fire-and-forget
+   * `session.observed` notification to the Context Fragmenter (per v5
+   * `apps/context-fragmenter.md`).
+   */
+  lastSeq: number;
 }
 
 export interface SessionCreated {
@@ -229,6 +236,7 @@ export class ChatService {
     const userMessageId = randomUUID();
     const assistantMessageId = randomUUID();
     const createdAt = new Date().toISOString();
+    let assistantSeq = 0;
 
     const tx = this.db.connection.transaction(() => {
       const seqRow = this.db.connection
@@ -251,6 +259,7 @@ export class ChatService {
           args.occurredAt,
           nextSeq++,
         );
+      assistantSeq = nextSeq;
       this.db.connection
         .prepare(
           `INSERT INTO messages (id, session_id, turn_id, role, content, parts_json, created_at, seq)
@@ -284,7 +293,13 @@ export class ChatService {
       );
     }
 
-    return { turnId, userMessageId, assistantMessageId, createdAt };
+    return {
+      turnId,
+      userMessageId,
+      assistantMessageId,
+      createdAt,
+      lastSeq: assistantSeq,
+    };
   }
 
   /**

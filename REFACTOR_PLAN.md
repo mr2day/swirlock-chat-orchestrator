@@ -195,39 +195,52 @@ bound to `cfg.llmHost.baseUrl`; `streamInfer` no longer accepts
 
 ### Phase C — add Context Fragmenter client
 
-- [ ] New module `src/fragmenter/`.
-- [ ] `FragmenterClientService` (Injectable, OnModuleInit/Destroy):
-  - persistent WS to `{fragmenter.baseUrl}/v5/fragmenter` (default
-    `ws://127.0.0.1:3215`).
-  - reconnect with backoff; identical pattern to
-    `PersistentModelHostSocket`.
-  - send-queue while disconnected, dropped after a small retry budget
-    (per contract: orchestrator's notifications are dropped after a short
-    retry; user-facing turn is unaffected).
-  - public methods:
-    - `notifyObserved({ sessionId, lastTurnId, lastSeq, observedAt })` →
-      sends `session.observed` envelope, fire-and-forget.
-    - `notifyInvalidated({ sessionId, reason? })` → sends
-      `session.invalidate`, fire-and-forget.
-  - subscribes to inbound `consolidation.updated` events; exposes a
-    minimal `onConsolidationUpdated(handler)` subscription for future
-    cache invalidation. The MVP orchestrator does not consume these
-    events; the subscription point exists so we don't need to refactor
-    the client when we do.
-  - heartbeat support.
-- [ ] `config.ts` + `service.config.cjs`: add a `fragmenter` slot:
-      `{ enabled: boolean, baseUrl: string, callerService: string, timeoutMs: number }`.
-      Default `enabled: false` so the orchestrator can run without a
-      Fragmenter during dev. When `enabled: false`, `FragmenterClientService`
-      is a no-op stub.
-- [ ] Wire into the conversation flow: after a turn is persisted, fire
-      `notifyObserved` with the persisted turn's `lastSeq`.
-- [ ] Wire into session deletion: fire `notifyInvalidated`.
+**Status: shipped on `v5-refactoring` branch.**
 
-Failure-mode requirement: every code path that calls a Fragmenter
-notification must remain correct when the call returns immediately
-(connection down, queue full). No `await` on Fragmenter work in the
-turn pipeline.
+- [x] New module `src/fragmenter/` with `FragmenterClientService` and
+      `FragmenterModule`.
+- [x] `FragmenterClientService`:
+  - persistent WS to `{fragmenter.baseUrl}/v5/fragmenter` (default
+    `ws://127.0.0.1:3215`); bearer auth via `Authorization` header on
+    upgrade.
+  - reconnect with backoff (`RECONNECT_BACKOFF_MS = 1s`); same pattern
+    as `PersistentModelHostSocket`.
+  - in-memory `outbox` of `QueuedFrame` while disconnected; bounded by
+    `MAX_QUEUE_DEPTH`; oldest-dropped on overflow; per-frame retry
+    budget `MAX_FRAME_ATTEMPTS`.
+  - public methods: `notifyObserved`, `notifyInvalidated` (both
+    fire-and-forget, both no-op when `cfg.fragmenter.enabled=false`).
+  - subscribes to inbound `consolidation.updated` envelopes; exposes
+    `onConsolidationUpdated(listener)` returning an unsubscribe fn.
+    The MVP orchestrator does not act on these (it reads consolidation
+    rows from shared SQLite at prompt-assembly time); the subscription
+    point is reserved for future in-process caches.
+- [x] `config.ts` + `service.config.cjs`: added a `fragmenter` slot
+      `{ enabled, baseUrl, bearerToken, callerService, timeoutMs }`.
+      Default in `service.config.cjs` is `enabled: true` pointing at
+      `http://127.0.0.1:3215`. When `enabled: false`, the client is a
+      pure no-op (no socket, notifiers return immediately).
+- [x] `ChatService.persistTurn` now returns `lastSeq` (the assistant
+      message's `seq`), so the orchestrator can include it in
+      `session.observed` per the v5 contract payload shape.
+- [x] `ChatStreamHandler.processTurn`: fires `fragmenter.notifyObserved`
+      after `persistTurn` returns and before `cleanupAbort()`. No
+      `await` — fire-and-forget.
+- [x] `ChatStreamHandler.processControlMessage`: fires
+      `fragmenter.notifyInvalidated({ reason: 'session.delete' })` on
+      `session.delete`.
+- [x] Wired `FragmenterModule` into `ChatModule`'s imports;
+      `ChatStreamHandler` constructor signature gained the
+      `FragmenterClientService` dependency (spec updated to match).
+- [x] Added `scripts/smoke-e2e.mjs` and an `npm run smoke:e2e` script
+      that drives a full `session.create` → `turn.submit` → `turn.done`
+      → fragmenter consolidation flow against the live Vanamonde +
+      Fragmenter LLM Hosts and verifies a row lands in
+      `fragmenter_session_summaries`.
+
+Failure-mode requirement satisfied: every notifier path returns
+synchronously and the user-facing turn pipeline never `await`s
+fragmenter work. End-to-end verified via `npm run smoke:e2e`.
 
 ### Phase D — honor Conversation Text Integrity
 

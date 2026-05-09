@@ -57,6 +57,23 @@ const env = {
     allowedModes: ['local_rag', 'live_web'],
     maxEvidenceChunks: 8,
   },
+
+  // Context Fragmenter peer module. Per v5, the orchestrator opens
+  // exactly one persistent WebSocket to the fragmenter and uses it for
+  // fire-and-forget notifications (`session.observed`,
+  // `session.invalidate`). The user-facing turn pipeline never blocks
+  // on fragmenter calls. When `enabled: false`, the orchestrator does
+  // not open the socket and silently no-ops the notifiers — useful in
+  // dev or when running the orchestrator standalone.
+  //
+  // `bearerToken` must match the fragmenter's `bearerToken`.
+  fragmenter: {
+    enabled: true,
+    baseUrl: 'http://127.0.0.1:3215',
+    bearerToken: 'dev-token-change-me',
+    callerService: 'chat-orchestrator',
+    timeoutMs: 30000,
+  },
 };
 
 module.exports = { env };
