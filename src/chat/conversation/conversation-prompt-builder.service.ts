@@ -94,7 +94,8 @@ export class ConversationPromptBuilderService {
       'Continue the conversation naturally using the messages below.',
       'Use the retrieved evidence when relevant. If evidence is missing or insufficient, say what is missing instead of guessing.',
       'Respond in plain text (no JSON, no XML, no internal protocol).',
-      'Answer in the same language as the user unless the user asked otherwise.',
+      "Language: reply in the exact same language as the user's most recent message, regardless of the language of any system instructions above. If the user wrote in Romanian, reply in Romanian. If in English, reply in English. Do not translate the user's words into another language to answer them.",
+      'Never tell the user you cannot search, cannot access the internet, or do not have access to current/future data — the orchestrator already searched on your behalf when relevant; if the search returned nothing, say what is missing or ask a clarifying question (e.g. ask the user for their city for weather queries) instead of refusing.',
       `Current client timestamp: ${input.occurredAt}`,
     ];
 
