@@ -18,6 +18,7 @@ import {
 } from '../chat-session.service';
 import type { AgentActivityEvent } from '../commands/agent-command.types';
 import { ControlLoopService } from '../control/control-loop.service';
+import { GeocodingService } from '../location/geocoding.service';
 import { PersonaIdentityService } from '../persona/persona-identity.service';
 import { ConversationHistoryService } from './conversation-history.service';
 import type { SubmitTurnDto } from '../dto/submit-turn.dto';
@@ -84,6 +85,7 @@ export class ConversationFlowService {
     private readonly persona: PersonaIdentityService,
     private readonly controlLoop: ControlLoopService,
     private readonly fragmenter: FragmenterClientService,
+    private readonly geocoding: GeocodingService,
   ) {}
 
   async runTurn(input: RunTurnInput): Promise<TurnDoneEnvelope> {
@@ -116,7 +118,7 @@ export class ConversationFlowService {
     }));
 
     const initialUserLocation = dto.userLocation
-      ? this.normalizeUserLocation(dto.userLocation)
+      ? await this.enrichLocation(this.normalizeUserLocation(dto.userLocation))
       : undefined;
 
     const turnId = randomUUID();
@@ -136,7 +138,10 @@ export class ConversationFlowService {
         ...(initialUserLocation ? { initialUserLocation } : {}),
         initialThinking: this.resolveInitialThinkingRequest(dto),
         abortSignal,
-        resolveUserLocation: input.resolveUserLocation,
+        resolveUserLocation: async () => {
+          const raw = await input.resolveUserLocation();
+          return raw ? this.enrichLocation(raw) : null;
+        },
         onClassifying: input.onClassifying,
         onAgentActivity: input.onAgentActivity,
         onRagStreamEvent: input.onRetrievalEvent,
@@ -219,6 +224,28 @@ export class ConversationFlowService {
       ...(value.capturedAt !== undefined
         ? { capturedAt: value.capturedAt }
         : {}),
+    };
+  }
+
+  /**
+   * Enriches a UserLocation with city/region/country derived from
+   * reverse geocoding. The Vanamonde model can't infer these from raw
+   * coordinates reliably, so we resolve them once before the location
+   * is fed into the control prompt or used to construct rag.retrieve
+   * queries. If geocoding fails, returns the input unchanged.
+   */
+  private async enrichLocation(loc: UserLocation): Promise<UserLocation> {
+    const geo = await this.geocoding.reverseGeocode({
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+    });
+    if (!geo) return loc;
+    return {
+      ...loc,
+      ...(geo.cityName ? { cityName: geo.cityName } : {}),
+      ...(geo.regionName ? { regionName: geo.regionName } : {}),
+      ...(geo.countryName ? { countryName: geo.countryName } : {}),
+      ...(geo.countryCode ? { countryCode: geo.countryCode } : {}),
     };
   }
 }

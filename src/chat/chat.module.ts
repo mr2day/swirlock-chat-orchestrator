@@ -15,11 +15,18 @@ import { ControlPromptBuilderService } from './control/control-prompt-builder.se
 import { ConversationFlowService } from './conversation/conversation-flow.service';
 import { ConversationHistoryService } from './conversation/conversation-history.service';
 import { ConversationPromptBuilderService } from './conversation/conversation-prompt-builder.service';
+import { LocationModule } from './location/location.module';
 import { PersonaIdentityService } from './persona/persona-identity.service';
 import { AgentTraceService } from './trace/agent-trace.service';
 
 @Module({
-  imports: [AuthModule, LlmHostModule, RagModule, FragmenterModule],
+  imports: [
+    AuthModule,
+    LlmHostModule,
+    RagModule,
+    FragmenterModule,
+    LocationModule,
+  ],
   providers: [
     ChatSessionService,
     ChatStreamHandler,

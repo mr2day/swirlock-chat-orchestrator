@@ -108,8 +108,16 @@ export class ControlPromptBuilderService {
     ];
 
     if (input.userLocation) {
+      const loc = input.userLocation;
+      const parts: string[] = [];
+      if (loc.cityName) parts.push(`city ${loc.cityName}`);
+      if (loc.regionName && loc.regionName !== loc.cityName) {
+        parts.push(`region ${loc.regionName}`);
+      }
+      if (loc.countryName) parts.push(`country ${loc.countryName}`);
+      parts.push(`latitude ${loc.latitude}`, `longitude ${loc.longitude}`);
       lines.push(
-        `User location available: latitude ${input.userLocation.latitude}, longitude ${input.userLocation.longitude}.`,
+        `User location available: ${parts.join(', ')}. Use the city name (and country if useful) when constructing rag.retrieve queries; do not feed raw coordinates into the query string.`,
       );
     }
 

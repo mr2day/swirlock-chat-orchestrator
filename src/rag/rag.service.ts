@@ -58,6 +58,16 @@ export interface UserLocation {
   longitude: number;
   accuracyMeters?: number;
   capturedAt?: string;
+  /**
+   * Server-side enrichment fields populated by the orchestrator's
+   * GeocodingService after the UI delivers raw coords. Not part of the
+   * v5 user-location contract; stripped before being forwarded to the
+   * RAG Engine.
+   */
+  cityName?: string;
+  regionName?: string;
+  countryName?: string;
+  countryCode?: string;
 }
 
 export interface RagInquiry {
@@ -99,6 +109,28 @@ function rawToString(raw: WebSocket.RawData): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Drop orchestrator-side enrichment fields (cityName, regionName,
+ * countryName, countryCode) before sending UserLocation to the RAG
+ * Engine. Per v5 contract, the RAG Engine accepts only the four base
+ * fields.
+ */
+function stripUserLocationToContract(loc: UserLocation): {
+  latitude: number;
+  longitude: number;
+  accuracyMeters?: number;
+  capturedAt?: string;
+} {
+  return {
+    latitude: loc.latitude,
+    longitude: loc.longitude,
+    ...(loc.accuracyMeters !== undefined
+      ? { accuracyMeters: loc.accuracyMeters }
+      : {}),
+    ...(loc.capturedAt !== undefined ? { capturedAt: loc.capturedAt } : {}),
+  };
 }
 
 @Injectable()
@@ -183,7 +215,9 @@ export class RagService implements OnModuleInit, OnModuleDestroy {
         freshness: inquiry.freshness ?? this.cfg.rag.freshness,
         allowedModes: inquiry.allowedModes ?? this.cfg.rag.allowedModes,
         maxEvidenceChunks: this.cfg.rag.maxEvidenceChunks,
-        ...(inquiry.userLocation ? { userLocation: inquiry.userLocation } : {}),
+        ...(inquiry.userLocation
+          ? { userLocation: stripUserLocationToContract(inquiry.userLocation) }
+          : {}),
       },
     };
   }
