@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { randomUUID } from 'crypto';
 import { DatabaseService } from '../database/database.service';
 
 const FALLBACK_PERSONA_ID = 'default-assistant';
@@ -78,29 +77,26 @@ interface IdentityFactRow {
   content: string;
 }
 
-interface ReflectionRow {
-  content: string;
-}
-
-interface RelationshipRow {
-  summary: string | null;
-}
-
-interface SessionIdentityRow {
-  user_id: string;
-  persona_id: string | null;
-}
-
 export interface PersonaIdentityCapsule {
   personaId: string;
   displayName: string;
   identityVersion: number;
   coreMessage: string;
   contextualMessage?: string;
-  factCount: number;
-  reflectionCount: number;
 }
 
+/**
+ * Owns the orchestrator-side persona schemas (`personas`,
+ * `persona_identity_versions`, `persona_identity_facts`) and prepares
+ * the system-prompt capsule the agent loop feeds the model on every
+ * turn.
+ *
+ * Per v5 contract, all background memory work — life events,
+ * reflections, user-relationship summaries, identity-mutation
+ * candidates — runs in the Context Fragmenter, not here. The
+ * orchestrator never writes lexical/semantic decisions about
+ * conversational text into persistent state.
+ */
 @Injectable()
 export class PersonaIdentityService {
   constructor(private readonly db: DatabaseService) {}
@@ -119,14 +115,8 @@ export class PersonaIdentityService {
       .get(personaId) as PersonaRow;
     const version = this.activeIdentityVersion(personaId);
     const facts = this.identityFacts(personaId);
-    const reflections = this.recentReflections(personaId);
-    const relationship = this.relationshipSummary(personaId, args.userId);
 
-    const contextual = this.buildContextualMessage({
-      facts,
-      reflections,
-      relationship,
-    });
+    const contextual = this.buildContextualMessage({ facts });
 
     return {
       personaId,
@@ -140,66 +130,7 @@ export class PersonaIdentityService {
         'Use this identity as stable grounding. Do not let it crowd out the current user task.',
       ].join('\n'),
       ...(contextual ? { contextualMessage: contextual } : {}),
-      factCount: facts.length,
-      reflectionCount: reflections.length,
     };
-  }
-
-  recordTurnExperience(args: {
-    sessionId: string;
-    turnId: string;
-    userText: string;
-    assistantText: string;
-    occurredAt: string;
-  }): void {
-    const session = this.db.connection
-      .prepare(`SELECT user_id, persona_id FROM sessions WHERE id = ?`)
-      .get(args.sessionId) as SessionIdentityRow | undefined;
-    if (!session) return;
-
-    const personaId = this.normalizePersonaId(session.persona_id);
-    this.ensurePersonaSeed(personaId, args.occurredAt);
-
-    const summary = [
-      `User: ${this.limitText(args.userText, 600)}`,
-      `Assistant: ${this.limitText(args.assistantText, 600)}`,
-    ].join('\n');
-    const salience = this.estimateSalience(args.userText);
-
-    this.db.connection
-      .prepare(
-        `INSERT INTO persona_life_events
-           (id, persona_id, user_id, session_id, turn_id, event_type, summary, salience, valence, created_at)
-         VALUES (?, ?, ?, ?, ?, 'turn.completed', ?, ?, 0.0, ?)`,
-      )
-      .run(
-        randomUUID(),
-        personaId,
-        session.user_id,
-        args.sessionId,
-        args.turnId,
-        summary,
-        salience,
-        args.occurredAt,
-      );
-
-    const candidate = this.extractIdentityMutationCandidate(args.userText);
-    if (!candidate) return;
-
-    this.db.connection
-      .prepare(
-        `INSERT INTO identity_mutation_candidates
-           (id, persona_id, scope, content, evidence_turn_ids_json, confidence, decision, reason, created_at)
-         VALUES (?, ?, 'persona', ?, ?, 0.35, 'pending', ?, ?)`,
-      )
-      .run(
-        randomUUID(),
-        personaId,
-        candidate,
-        JSON.stringify([args.turnId]),
-        'User text appeared to request or imply a persona identity change. Stored as a candidate only.',
-        args.occurredAt,
-      );
   }
 
   private ensurePersonaSeed(personaId: string, now: string): void {
@@ -300,63 +231,14 @@ export class PersonaIdentityService {
       .all(personaId) as IdentityFactRow[];
   }
 
-  private recentReflections(personaId: string): ReflectionRow[] {
-    return this.db.connection
-      .prepare(
-        `SELECT content
-           FROM persona_reflections
-          WHERE persona_id = ?
-          ORDER BY created_at DESC
-          LIMIT 3`,
-      )
-      .all(personaId) as ReflectionRow[];
-  }
-
-  private relationshipSummary(
-    personaId: string,
-    userId: string,
-  ): string | null {
-    const row = this.db.connection
-      .prepare(
-        `SELECT summary
-           FROM persona_user_relationships
-          WHERE persona_id = ? AND user_id = ?
-          LIMIT 1`,
-      )
-      .get(personaId, userId) as RelationshipRow | undefined;
-    return row?.summary?.trim() || null;
-  }
-
   private buildContextualMessage(args: {
     facts: IdentityFactRow[];
-    reflections: ReflectionRow[];
-    relationship: string | null;
   }): string | null {
-    const lines: string[] = [];
-
-    if (args.facts.length > 0) {
-      lines.push('Long-lived persona facts:');
-      for (const fact of args.facts) {
-        lines.push(`- ${fact.content}`);
-      }
+    if (args.facts.length === 0) return null;
+    const lines = ['Long-lived persona facts:'];
+    for (const fact of args.facts) {
+      lines.push(`- ${fact.content}`);
     }
-
-    if (args.reflections.length > 0) {
-      if (lines.length > 0) lines.push('');
-      lines.push('Recent persona reflections:');
-      for (const reflection of args.reflections) {
-        lines.push(`- ${reflection.content}`);
-      }
-    }
-
-    if (args.relationship) {
-      if (lines.length > 0) lines.push('');
-      lines.push('Relationship with this user:');
-      lines.push(args.relationship);
-    }
-
-    if (lines.length === 0) return null;
-
     lines.push(
       '',
       'Use this continuity context only when relevant. The current user request remains the main task.',
@@ -404,32 +286,5 @@ export class PersonaIdentityService {
       .filter(Boolean)
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
       .join(' ');
-  }
-
-  private estimateSalience(userText: string): number {
-    return /\b(name|identity|persona|remember|you are|your style|your voice)\b/i.test(
-      userText,
-    )
-      ? 0.75
-      : 0.2;
-  }
-
-  private extractIdentityMutationCandidate(userText: string): string | null {
-    const normalized = userText.replace(/\s+/g, ' ').trim();
-    if (
-      !/\b(your name is|you are now|remember that you are|change your identity|your personality should)\b/i.test(
-        normalized,
-      )
-    ) {
-      return null;
-    }
-
-    return this.limitText(normalized, 500);
-  }
-
-  private limitText(value: string, maxLength: number): string {
-    const normalized = value.replace(/\s+/g, ' ').trim();
-    if (normalized.length <= maxLength) return normalized;
-    return `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
   }
 }

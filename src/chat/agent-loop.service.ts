@@ -839,10 +839,7 @@ export class AgentLoopService {
       if (historyMessage.role === 'system') continue;
       messages.push({
         role: historyMessage.role,
-        content:
-          historyMessage.role === 'assistant'
-            ? this.sanitizeAssistantHistoryContent(historyMessage.content)
-            : historyMessage.content,
+        content: historyMessage.content,
       });
     }
 
@@ -981,39 +978,6 @@ export class AgentLoopService {
 
   private isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
-  }
-
-  /**
-   * Strips a leading greeting/self-introduction paragraph from a previously
-   * persisted assistant message before feeding it back to the model as
-   * conversation history. Past assistant messages that begin with
-   * "Salut! Sunt Gigi the Robot..." cause smaller chat models to mirror
-   * that pattern on every subsequent turn. The persona prompt forbids
-   * mid-conversation greetings going forward, but for sessions that already
-   * contain such turns we sanitize them at prompt-assembly time so the
-   * model does not learn the greeting habit from its own outputs.
-   *
-   * Conservative: only strips the first paragraph, only when it both
-   * starts with a recognisable greeting AND mentions the persona's name
-   * or identity. Falls back to the original content if stripping would
-   * leave the message empty.
-   */
-  private sanitizeAssistantHistoryContent(content: string): string {
-    if (!content) return content;
-    const paragraphs = content.split(/\n{2,}/);
-    if (paragraphs.length === 0) return content;
-    const first = paragraphs[0]?.trim() ?? '';
-    if (!first) return content;
-    const greetingHead =
-      /^\s*(salut(?:are)?|hello|hi|hey|bună(?:\s+(?:ziua|dimineața|seara))?|good\s+(?:morning|afternoon|evening|day))\b/i;
-    const personaIntro =
-      /\b(sunt|i'?m|i\s+am|eu\s+sunt|me\s+numesc|my\s+name\s+is)\b[^.\n!?]{0,120}\b(gigi|robot|asistent|assistant|bot)\b/i;
-    const looksLikeGreeting = greetingHead.test(first);
-    if (!looksLikeGreeting) return content;
-    const stripsCleanly = personaIntro.test(first) || first.length <= 160;
-    if (!stripsCleanly) return content;
-    const rest = paragraphs.slice(1).join('\n\n').trim();
-    return rest.length > 0 ? rest : content;
   }
 
   private friendlyCommandStartedSummary(

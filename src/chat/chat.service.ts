@@ -2,7 +2,6 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
@@ -91,8 +90,6 @@ export interface SessionDeleted {
 
 @Injectable()
 export class ChatService {
-  private readonly log = new Logger(ChatService.name);
-
   constructor(
     private readonly db: DatabaseService,
     private readonly personaIdentity: PersonaIdentityService,
@@ -278,20 +275,6 @@ export class ChatService {
         .run(createdAt, args.sessionId);
     });
     tx();
-
-    try {
-      this.personaIdentity.recordTurnExperience({
-        sessionId: args.sessionId,
-        turnId,
-        userText: args.userText,
-        assistantText: args.assistantText,
-        occurredAt: createdAt,
-      });
-    } catch (err) {
-      this.log.warn(
-        `Persona identity experience recording failed: ${(err as Error).message}`,
-      );
-    }
 
     return {
       turnId,

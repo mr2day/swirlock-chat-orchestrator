@@ -13,8 +13,6 @@ const SIMPLE_PREPARED_TURN: PreparedAgentTurn = {
     displayName: 'Gigi the Robot',
     identityVersion: 1,
     coreMessage: 'Core persona identity:\nYou are Gigi the Robot.',
-    factCount: 1,
-    reflectionCount: 0,
   },
   history: [],
   llmParts: [],

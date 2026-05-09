@@ -244,32 +244,45 @@ fragmenter work. End-to-end verified via `npm run smoke:e2e`.
 
 ### Phase D — honor Conversation Text Integrity
 
-- [ ] Delete [`agent-loop.service.ts:1001 sanitizeAssistantHistoryContent`](src/chat/agent-loop.service.ts#L1001)
-      and its caller in `buildFinalAnswerMessages` (~line 844). The
-      persona system prompt forbids mid-conversation greetings; trust it.
-      During the move to the new layout (Phase E), do not port this
-      method to `ConversationPromptBuilder`.
-- [ ] Delete [`persona-identity.service.ts:409 estimateSalience`](src/chat/persona-identity.service.ts#L409)
-      and [`persona-identity.service.ts:417 extractIdentityMutationCandidate`](src/chat/persona-identity.service.ts#L417).
-      Both are regex-on-conversational-text and both will be done by the
-      Fragmenter once it is built.
-- [ ] Delete `persona-identity.service.ts recordTurnExperience` entirely.
-      It is the inline-after-every-turn write that v5 explicitly says
-      belongs to the Fragmenter, not the orchestrator's hot path.
-- [ ] Delete the call to `recordTurnExperience` from
-      `chat.service.persistTurn` (or its successor in the new layout).
+**Status: shipped on `v5-refactoring` branch.**
+
+- [x] Deleted `sanitizeAssistantHistoryContent` from
+      `agent-loop.service.ts` along with its caller in
+      `buildFinalAnswerMessages`. The persona system prompt is the only
+      thing that controls greeting/intro behavior in v5.
+- [x] Deleted `estimateSalience`, `extractIdentityMutationCandidate`,
+      and `recordTurnExperience` from `persona-identity.service.ts`.
+      All were regex-driven semantic decisions on conversational text;
+      consolidation work of that flavour belongs in the Fragmenter.
+- [x] Deleted the inline `personaIdentity.recordTurnExperience` call
+      from `ChatService.persistTurn` (and the now-unused `Logger`
+      injection along with it).
+- [x] Slimmed `PersonaIdentityCapsule` to `{ personaId, displayName,
+      identityVersion, coreMessage, contextualMessage? }`. Dropped
+      `factCount`/`reflectionCount` (they were unused in production)
+      and the `recentReflections` / `relationshipSummary` queries
+      (their backing tables are being dropped — see migrations below).
+      `prepareCapsule` now produces a contextual message from
+      long-lived persona facts only.
 
 After this phase:
 
 - `personas`, `persona_identity_versions`, `persona_identity_facts`
   remain orchestrator-owned schemas (per contract). They are still
   seeded by `prepareCapsule` on first session.
-- Drop the migrations for `persona_life_events`, `persona_reflections`,
-  `persona_user_relationships`, `persona_identity_snapshots`,
-  `identity_mutation_candidates`. The Fragmenter writes to its *own*
-  tables per `apps/context-fragmenter.md`; if/when consolidation needs
-  equivalent storage, the Fragmenter will define its own schemas under
-  its own ownership.
+- Dropped the migrations for `persona_life_events`,
+  `persona_reflections`, `persona_user_relationships`,
+  `persona_identity_snapshots`, `identity_mutation_candidates` from
+  `database.service.ts`. Existing deployments retain those tables as
+  orphan schemas (no destructive `DROP TABLE` ships); fresh deployments
+  no longer create them. The Fragmenter writes to its *own* tables per
+  `apps/context-fragmenter.md`; if/when consolidation needs equivalent
+  storage, it will define schemas under its own ownership.
+
+Test gate: build, lint, and 8/8 jest tests pass after the slim-down.
+End-to-end smoke run via `npm run smoke:e2e` confirms the agent loop
++ fragmenter consolidation still produce a correct rolling summary
+without the deleted regex paths.
 
 ### Phase E — split `chat-stream.handler.ts` and `agent-loop.service.ts`
 
