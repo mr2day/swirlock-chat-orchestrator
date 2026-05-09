@@ -6,14 +6,14 @@ import {
 } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 import { FragmenterClientService } from '../fragmenter/fragmenter-client.service';
-import type { RetrievalStreamEvent } from '../rag/rag.service';
 import type { UserLocation } from '../rag/rag.service';
-import { AgentLoopService } from './agent-loop.service';
-import { ChatService } from './chat.service';
-import type { PersistedTurn, PreparedAgentTurn } from './chat.service';
+import { ChatSessionService } from './chat-session.service';
+import {
+  ConversationFlowService,
+  type TurnDoneEnvelope,
+} from './conversation/conversation-flow.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { SubmitTurnDto } from './dto/submit-turn.dto';
 
@@ -22,7 +22,7 @@ interface ConnectionContext {
   correlationId: string;
 }
 
-interface V4Envelope {
+interface ChatEnvelope {
   type: string;
   correlationId: string;
   payload?: unknown;
@@ -58,13 +58,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * WebSocket endpoint handler for `/v5/chat`.
+ *
+ * Owns:
+ * - envelope parsing and routing (one inbound JSON object per frame)
+ * - the per-connection turn-in-flight lock (one user turn at a time
+ *   per WS, per the contract)
+ * - the per-correlation `turn.location_required` mailbox
+ * - dispatch to ChatSessionService for session.* messages and to
+ *   ConversationFlowService for turn.submit
+ *
+ * Does not own:
+ * - any prompt construction (lives in `*-prompt-builder.service.ts`)
+ * - any LLM/RAG/fragmenter call (lives in their respective services)
+ * - session/message persistence (lives in ChatSessionService)
+ */
 @Injectable()
 export class ChatStreamHandler {
   private readonly log = new Logger(ChatStreamHandler.name);
 
   constructor(
-    private readonly chat: ChatService,
-    private readonly agentLoop: AgentLoopService,
+    private readonly sessions: ChatSessionService,
+    private readonly conversation: ConversationFlowService,
     private readonly fragmenter: FragmenterClientService,
   ) {}
 
@@ -74,7 +90,7 @@ export class ChatStreamHandler {
     const pendingLocations = new Map<string, PendingLocationRequest>();
 
     ws.on('message', (raw: WebSocket.RawData) => {
-      let envelope: V4Envelope;
+      let envelope: ChatEnvelope;
       try {
         envelope = this.parseEnvelope(raw);
       } catch (err) {
@@ -131,20 +147,18 @@ export class ChatStreamHandler {
         }
 
         inFlightTurn = true;
-        void this.processTurn(
-          ws,
-          ctx,
-          submitted,
-          (abort) => {
-            activeTurnAbort = abort;
-          },
-          pendingLocations,
-        )
+        const abort = new AbortController();
+        activeTurnAbort = abort;
+        const onClose = (): void => abort.abort();
+        ws.once('close', onClose);
+
+        void this.processTurn(ws, ctx, submitted, abort, pendingLocations)
           .catch((err: Error) => {
             this.log.error(`processTurn crashed: ${err.message}`, err.stack);
             this.sendError(ws, envelope.correlationId, 500, err.message);
           })
           .finally(() => {
+            ws.off('close', onClose);
             activeTurnAbort = null;
             inFlightTurn = false;
             const pending = pendingLocations.get(submitted.correlationId);
@@ -170,7 +184,7 @@ export class ChatStreamHandler {
   private async processControlMessage(
     ws: WebSocket,
     ctx: ConnectionContext,
-    envelope: V4Envelope,
+    envelope: ChatEnvelope,
   ): Promise<void> {
     if (envelope.type === 'health.get') {
       this.send(ws, {
@@ -191,7 +205,7 @@ export class ChatStreamHandler {
         this.requirePayloadRequest(envelope),
       );
       await this.validateDto(dto);
-      const data = this.chat.createSession({
+      const data = this.sessions.createSession({
         dto,
         authUserId: ctx.authUserId,
       });
@@ -205,7 +219,7 @@ export class ChatStreamHandler {
 
     if (envelope.type === 'session.get') {
       const sessionId = this.requireSessionId(envelope);
-      const data = this.chat.getSession({
+      const data = this.sessions.getSession({
         sessionId,
         authUserId: ctx.authUserId,
       });
@@ -219,7 +233,7 @@ export class ChatStreamHandler {
 
     if (envelope.type === 'session.delete') {
       const sessionId = this.requireSessionId(envelope);
-      const data = this.chat.deleteSession({
+      const data = this.sessions.deleteSession({
         sessionId,
         authUserId: ctx.authUserId,
       });
@@ -247,91 +261,41 @@ export class ChatStreamHandler {
     ws: WebSocket,
     ctx: ConnectionContext,
     submitted: SubmittedTurn,
-    setActiveAbort: (abort: AbortController) => void,
+    abort: AbortController,
     pendingLocations: Map<string, PendingLocationRequest>,
   ): Promise<void> {
     const { correlationId, dto, sessionId } = submitted;
     const send = (type: string, payload: unknown = {}): void =>
       this.send(ws, { type, correlationId, payload });
-    let cleanupAbort = (): void => undefined;
-    const failTurn = (status: number, message: string): void => {
-      cleanupAbort();
-      this.sendError(ws, correlationId, status, message);
-    };
 
     try {
       await this.validateDto(dto);
     } catch (err) {
-      failTurn(400, err instanceof Error ? err.message : 'Invalid turn');
-      return;
-    }
-
-    send('turn.accepted');
-    send('turn.classifying');
-
-    const abort = new AbortController();
-    setActiveAbort(abort);
-    const onClose = (): void => abort.abort();
-    cleanupAbort = (): void => {
-      ws.off('close', onClose);
-    };
-    ws.once('close', onClose);
-
-    const turnId = randomUUID();
-    let prepared: PreparedAgentTurn;
-    try {
-      prepared = this.chat.prepareAgentTurn({
-        sessionId,
-        dto,
-        authUserId: ctx.authUserId,
-      });
-    } catch (err) {
-      const status = err instanceof HttpException ? err.getStatus() : 500;
-      failTurn(status, (err as Error).message);
-      return;
-    }
-
-    const initialUserLocation = dto.userLocation
-      ? {
-          latitude: dto.userLocation.latitude,
-          longitude: dto.userLocation.longitude,
-          ...(dto.userLocation.accuracyMeters !== undefined
-            ? { accuracyMeters: dto.userLocation.accuracyMeters }
-            : {}),
-          ...(dto.userLocation.capturedAt !== undefined
-            ? { capturedAt: dto.userLocation.capturedAt }
-            : {}),
-        }
-      : undefined;
-
-    let agentResult: Awaited<ReturnType<AgentLoopService['run']>>;
-    let emittedStarted = false;
-    try {
-      agentResult = await this.agentLoop.run({
-        sessionId,
-        turnId,
+      this.sendError(
+        ws,
         correlationId,
-        prepared,
-        occurredAt: dto.message.occurredAt,
-        ...(initialUserLocation ? { initialUserLocation } : {}),
-        initialThinking: this.resolveInitialThinkingRequest(dto),
+        400,
+        err instanceof Error ? err.message : 'Invalid turn',
+      );
+      return;
+    }
+
+    let emittedStarted = false;
+
+    let result: TurnDoneEnvelope;
+    try {
+      result = await this.conversation.runTurn({
+        sessionId,
+        authUserId: ctx.authUserId,
+        correlationId,
+        dto,
         abortSignal: abort.signal,
-        resolveUserLocation: () =>
-          this.requestLocationFromUi(
-            ws,
-            correlationId,
-            pendingLocations,
-            abort.signal,
-          ),
-        onRagStreamEvent: (event: RetrievalStreamEvent) => {
-          send('turn.retrieval', { event });
+        onAccepted: () => {
+          send('turn.accepted');
+          send('turn.classifying');
         },
-        onFinalChunk: (text: string) => {
-          send('turn.chunk', { text });
-        },
-        onClassifying: (info) => {
-          send('turn.classifying', { step: info.step });
-        },
+        onClassifying: (info) => send('turn.classifying', { step: info.step }),
+        onRetrievalEvent: (event) => send('turn.retrieval', { event }),
         onAgentActivity: (event) => {
           send('turn.agent', {
             phase: event.phase,
@@ -358,6 +322,14 @@ export class ChatStreamHandler {
               break;
           }
         },
+        onFinalChunk: (text) => send('turn.chunk', { text }),
+        resolveUserLocation: () =>
+          this.requestLocationFromUi(
+            ws,
+            correlationId,
+            pendingLocations,
+            abort.signal,
+          ),
       });
     } catch (err) {
       const status =
@@ -366,67 +338,14 @@ export class ChatStreamHandler {
           : err instanceof HttpException
             ? err.getStatus()
             : 500;
-      failTurn(status, (err as Error).message);
+      this.sendError(ws, correlationId, status, (err as Error).message);
       return;
     }
 
-    if (agentResult.assistantText.length === 0) {
-      failTurn(503, 'Agent completed without producing final answer text');
-      return;
-    }
-
-    let persisted: PersistedTurn;
-    try {
-      persisted = this.chat.persistTurn({
-        sessionId,
-        turnId,
-        parts: dto.message.parts,
-        userText: prepared.userText,
-        occurredAt: dto.message.occurredAt,
-        assistantText: agentResult.assistantText,
-      });
-    } catch (err) {
-      this.log.error(`persistTurn failed: ${(err as Error).message}`);
-      failTurn(500, 'Failed to persist turn');
-      return;
-    }
-
-    // Fire-and-forget notification to the Context Fragmenter. The
-    // user-facing turn pipeline does not wait for any reply per v5
-    // contract; if the fragmenter is unavailable the notification is
-    // dropped and the next turn simply finds whatever consolidation
-    // was already in place (possibly none).
-    this.fragmenter.notifyObserved({
-      sessionId,
-      lastTurnId: persisted.turnId,
-      lastSeq: persisted.lastSeq,
-      observedAt: persisted.createdAt,
-    });
-
-    cleanupAbort();
-    send('turn.done', {
-      sessionId,
-      turnId: persisted.turnId,
-      assistantMessage: {
-        messageId: persisted.assistantMessageId,
-        content: agentResult.assistantText,
-        createdAt: persisted.createdAt,
-      },
-      finishReason: agentResult.finishReason,
-      citations: agentResult.citations,
-      ...(dto.options?.includeDiagnostics === true
-        ? {
-            diagnostics: {
-              ...agentResult.diagnostics,
-              personaId: prepared.identity.personaId,
-              identityVersion: prepared.identity.identityVersion,
-            },
-          }
-        : {}),
-    });
+    send('turn.done', result);
   }
 
-  private parseEnvelope(raw: WebSocket.RawData): V4Envelope {
+  private parseEnvelope(raw: WebSocket.RawData): ChatEnvelope {
     let parsed: unknown;
     try {
       parsed = JSON.parse(rawToString(raw));
@@ -454,7 +373,7 @@ export class ChatStreamHandler {
     };
   }
 
-  private parseSubmittedTurn(envelope: V4Envelope): SubmittedTurn {
+  private parseSubmittedTurn(envelope: ChatEnvelope): SubmittedTurn {
     if (!isRecord(envelope.payload)) {
       throw new Error('turn.submit payload is required');
     }
@@ -477,14 +396,14 @@ export class ChatStreamHandler {
     };
   }
 
-  private requirePayloadRequest(envelope: V4Envelope): unknown {
+  private requirePayloadRequest(envelope: ChatEnvelope): unknown {
     if (!isRecord(envelope.payload) || !isRecord(envelope.payload.request)) {
       throw new Error(`${envelope.type} payload.request is required`);
     }
     return envelope.payload.request;
   }
 
-  private requireSessionId(envelope: V4Envelope): string {
+  private requireSessionId(envelope: ChatEnvelope): string {
     if (!isRecord(envelope.payload)) {
       throw new Error(`${envelope.type} payload is required`);
     }
@@ -511,7 +430,7 @@ export class ChatStreamHandler {
     }
   }
 
-  private send(ws: WebSocket, event: V4Envelope): void {
+  private send(ws: WebSocket, event: ChatEnvelope): void {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(event));
     }
@@ -555,12 +474,6 @@ export class ChatStreamHandler {
       default:
         return status >= 500 ? 'internal_error' : 'bad_request';
     }
-  }
-
-  private resolveInitialThinkingRequest(dto: SubmitTurnDto): boolean {
-    if (dto.options?.forceThinking === true) return true;
-    if (dto.options?.thinking === false) return false;
-    return false;
   }
 
   private async requestLocationFromUi(
@@ -613,7 +526,7 @@ export class ChatStreamHandler {
   }
 
   private resolveLocationResponse(
-    envelope: V4Envelope,
+    envelope: ChatEnvelope,
     pendingLocations: Map<string, PendingLocationRequest>,
   ): void {
     const pending = pendingLocations.get(envelope.correlationId);

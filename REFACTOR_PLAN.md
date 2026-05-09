@@ -286,65 +286,73 @@ without the deleted regex paths.
 
 ### Phase E — split `chat-stream.handler.ts` and `agent-loop.service.ts`
 
-The largest phase. Land in one PR if practical to avoid half-applied
-imports.
+**Status: shipped on `v5-refactoring` branch.**
 
-- [ ] **Conversation flow**:
-  - `src/chat/conversation/conversation-flow.service.ts` — extract the
-    `processTurn` body from `chat-stream.handler.ts`. Owns the per-turn
-    state machine (validate → run control loop → persist → notify
-    Fragmenter → emit `turn.done`). Calls but does not contain
-    `ControlLoopService`, `ConversationPromptBuilder`, `ChatSessionService`,
-    `FragmenterClientService`.
-  - `src/chat/conversation/conversation-prompt-builder.service.ts` —
-    takes over `buildFinalAnswerMessages` + `buildFinalAnswerPrompt` from
-    `agent-loop.service.ts`. Treats consolidation as optional (a
-    consolidated history view that may be empty).
-  - `src/chat/conversation/conversation-history.service.ts` — reads
-    `messages` rows; reads Fragmenter result tables (currently empty)
-    and merges them into a `HistoryView` object the prompt builder
-    consumes. For now: returns raw history; the consolidation slot is
-    `null`.
-- [ ] **Control / agent loop**:
-  - `src/chat/control/control-loop.service.ts` — takes over
-    `AgentLoopService.run`. Calls `ControlPromptBuilder` for each step,
-    parses the frame via `ControlFrameParser`, dispatches to one of the
-    `commands/*.command.ts`. Hands off to `ConversationPromptBuilder` +
-    `LlmHostService` when the model signals `mode: final`.
-  - `src/chat/control/control-prompt-builder.service.ts` — takes over
-    `buildAgentMessages` + `buildAgentControlPrompt`. Owns the
-    `summarizePriorAssistantTurn` substitution (still legal under v5;
-    it's a mechanical transform on structured trace data, not on
-    conversational meaning).
-  - `src/chat/control/control-frame-parser.ts` — exports
-    `parseAgentFrame(text): AgentFrame` and the `parseJsonObject`
-    helper.
-- [ ] **Commands (one file each)**:
-  - `src/chat/commands/agent-command.types.ts` — `AgentFrame`,
+The structural reshuffle of `chat-stream.handler.ts` and the old
+`agent-loop.service.ts` into the per-purpose tree from the plan.
+Behavioral parity with Phase D verified end-to-end via
+`npm run smoke:e2e`.
+
+- [x] **Conversation**:
+  - `src/chat/conversation/conversation-flow.service.ts` owns the
+    per-turn state machine: validate → load session → load history
+    view → prepare capsule → run control loop → append turn → notify
+    fragmenter → return `TurnDoneEnvelope`.
+  - `src/chat/conversation/conversation-prompt-builder.service.ts`
+    owns the streaming final-answer prompt; treats fragmenter
+    consolidation as optional, injecting it as a system block when
+    present.
+  - `src/chat/conversation/conversation-history.service.ts` reads
+    orchestrator-owned `messages` rows + fragmenter-owned
+    `fragmenter_session_summaries` via plain SQL, merging them into a
+    `ConversationHistoryView`.
+- [x] **Control**:
+  - `src/chat/control/control-loop.service.ts` replaces
+    `AgentLoopService.run`. Iterates through control-step inferences,
+    parses frames, dispatches to one of the `AgentCommand`
+    implementations registered through DI, and hands off to the
+    `ConversationPromptBuilderService` for the final answer.
+  - `src/chat/control/control-prompt-builder.service.ts` owns the
+    JSON-mode control prompt and the `summarizePriorAssistantTurn`
+    substitution on assistant history.
+  - `src/chat/control/control-frame-parser.ts` exports the pure
+    `parseAgentFrame`/`parseJsonObject` helpers.
+- [x] **Commands (one file each)**:
+  - `src/chat/commands/agent-command.types.ts` defines `AgentFrame`,
     `AgentObservation`, `AgentCommandResult`, `AgentActivityEvent`,
     `AgentCommandContext`, and the `AgentCommand` interface.
-  - `src/chat/commands/rag-retrieve.command.ts` — `executeRagRetrieve`.
-  - `src/chat/commands/location-request.command.ts` —
-    `executeLocationRequest`.
-  - `src/chat/commands/plan-create.command.ts` — `executePlanCreate`.
-  - `src/chat/commands/plan-update.command.ts` — `executePlanUpdate`.
-  - `src/chat/commands/agent-continue-options.command.ts` —
-    `executeContinueWithOptions`.
-  - The within-turn dedup map for `rag.retrieve` (`retrievedQueries`)
-    stays inside `ControlLoopService`'s per-run state, not in the
-    command file.
-- [ ] **Trim the handler**:
-  - `chat-stream.handler.ts` collapses to: parse envelope, route by
-    type, dispatch to `ChatSessionService` for session.* and
-    `ConversationFlowService` for `turn.submit`. The location-request
+  - `src/chat/commands/command-utils.ts` holds the small `stringArg`,
+    `enumArg`, `isRecord`, `limitText` helpers used across commands.
+  - `src/chat/commands/{rag-retrieve,location-request,plan-create,plan-update,agent-continue-options}.command.ts`
+    each implement `AgentCommand` for their command. Within-turn
+    `rag.retrieve` deduplication stays inside `ControlLoopService` —
+    `RagRetrieveCommand.normalizeKey` exposes the cache key but the
+    cache lives in the loop's per-run state.
+- [x] **Sessions / persistence**:
+  - `src/chat/chat-session.service.ts` owns session create/get/delete,
+    `appendTurn` (atomic user+assistant insert with `lastSeq`), and
+    helpers `extractUserText`/`extractImageParts`. Replaces the old
+    `ChatService`.
+- [x] **Slim handler**:
+  - `chat-stream.handler.ts` is now envelope routing only:
+    parse envelope, route by type, dispatch to `ChatSessionService`
+    for `session.*` and `ConversationFlowService.runTurn` for
+    `turn.submit`. The per-correlation `turn.location_required`
     mailbox stays here (it is a WS-facing concern).
-  - Rename `V4Envelope` → `ChatEnvelope` (the envelope shape did not
-    actually change v4 → v5; the name was wrong).
-- [ ] **Persona service slim-down**: after Phase D + the structural
-      shuffle, `persona-identity.service.ts` should contain only
-      `prepareCapsule` and the schema seed/upsert helpers. Move it under
-      `src/chat/persona/`.
-- [ ] **Trace service**: move to `src/chat/trace/`. Behavior unchanged.
+  - `V4Envelope` renamed to `ChatEnvelope`.
+- [x] **Persona / trace moved**:
+  - `src/chat/persona-identity.service.ts` → `src/chat/persona/persona-identity.service.ts`.
+  - `src/chat/agent-trace.service.ts` → `src/chat/trace/agent-trace.service.ts`.
+- [x] **Deletions**: `src/chat/chat.service.ts` and
+      `src/chat/agent-loop.service.ts` removed wholesale; their
+      responsibilities are now spread across the per-purpose files
+      above.
+
+Test gate: `npm run build` clean, `npm run lint` clean. Live
+end-to-end via `npm run smoke:e2e` produced a coherent rolling
+summary (Romanian "Oțel" exchange) — full agent loop + fragmenter
+consolidation verified against the live Vanamonde + Fragmenter LLM
+Hosts.
 
 ### Phase F — verification
 

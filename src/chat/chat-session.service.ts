@@ -6,11 +6,8 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { DatabaseService } from '../database/database.service';
-import type { LlmInputPart } from '../llm-host/llm-host.service';
 import { CreateSessionDto } from './dto/create-session.dto';
-import type { InputPartDto, SubmitTurnDto } from './dto/submit-turn.dto';
-import { PersonaIdentityService } from './persona-identity.service';
-import type { PersonaIdentityCapsule } from './persona-identity.service';
+import type { InputPartDto } from './dto/submit-turn.dto';
 
 interface SessionRow {
   id: string;
@@ -24,7 +21,7 @@ interface SessionRow {
   updated_at: string;
 }
 
-export interface ConversationMessage {
+interface MessageRow {
   id: string;
   session_id: string;
   turn_id: string;
@@ -33,34 +30,6 @@ export interface ConversationMessage {
   parts_json: string | null;
   created_at: string;
   seq: number;
-}
-
-interface ChatImagePart {
-  imageUrl?: string;
-  imageBase64?: string;
-  mimeType?: string;
-}
-
-export interface PreparedAgentTurn {
-  userText: string;
-  imageParts: ChatImagePart[];
-  identity: PersonaIdentityCapsule;
-  history: ConversationMessage[];
-  llmParts: LlmInputPart[];
-}
-
-export interface PersistedTurn {
-  turnId: string;
-  userMessageId: string;
-  assistantMessageId: string;
-  createdAt: string;
-  /**
-   * `seq` of the assistant message that was just inserted. Surfaced so
-   * the orchestrator can include it in the fire-and-forget
-   * `session.observed` notification to the Context Fragmenter (per v5
-   * `apps/context-fragmenter.md`).
-   */
-  lastSeq: number;
 }
 
 export interface SessionCreated {
@@ -88,12 +57,31 @@ export interface SessionDeleted {
   deleted: true;
 }
 
+export interface AppendedTurn {
+  turnId: string;
+  userMessageId: string;
+  assistantMessageId: string;
+  createdAt: string;
+  /** seq of the assistant message just inserted (used for fragmenter session.observed). */
+  lastSeq: number;
+}
+
+export interface LoadedSession {
+  id: string;
+  userId: string;
+  personaId: string | null;
+}
+
+/**
+ * Owns the session/messages CRUD and the atomic per-turn append.
+ *
+ * Sessions and messages tables are orchestrator-owned per v5
+ * `apps/context-fragmenter.md`. The fragmenter reads from `messages`
+ * but never writes to it.
+ */
 @Injectable()
-export class ChatService {
-  constructor(
-    private readonly db: DatabaseService,
-    private readonly personaIdentity: PersonaIdentityService,
-  ) {}
+export class ChatSessionService {
+  constructor(private readonly db: DatabaseService) {}
 
   createSession(args: {
     dto: CreateSessionDto;
@@ -128,13 +116,13 @@ export class ChatService {
 
   getSession(args: { sessionId: string; authUserId: string }): SessionSnapshot {
     const { sessionId, authUserId } = args;
-    const session = this.loadSession(sessionId, authUserId);
+    const session = this.loadSessionRow(sessionId, authUserId);
     const messages = this.db.connection
       .prepare(
         `SELECT id, session_id, turn_id, role, content, parts_json, created_at, seq
            FROM messages WHERE session_id = ? ORDER BY seq ASC`,
       )
-      .all(sessionId) as ConversationMessage[];
+      .all(sessionId) as MessageRow[];
     return {
       sessionId: session.id,
       createdAt: session.created_at,
@@ -155,7 +143,7 @@ export class ChatService {
     authUserId: string;
   }): SessionDeleted {
     const { sessionId, authUserId } = args;
-    this.loadSession(sessionId, authUserId);
+    this.loadSessionRow(sessionId, authUserId);
     const tx = this.db.connection.transaction((id: string) => {
       this.db.connection
         .prepare(`DELETE FROM messages WHERE session_id = ?`)
@@ -167,68 +155,32 @@ export class ChatService {
   }
 
   /**
-   * Loads the raw conversational context for the agent-controlled turn path.
-   * This deliberately does not classify, retrieve, or decide model options;
-   * the agent loop owns those decisions.
+   * Loads a session's identity for the conversation flow. Verifies
+   * auth and throws on missing/forbidden.
    */
-  prepareAgentTurn(args: {
-    sessionId: string;
-    dto: SubmitTurnDto;
-    authUserId: string;
-  }): PreparedAgentTurn {
-    const { sessionId, dto, authUserId } = args;
-    const session = this.loadSession(sessionId, authUserId);
-
-    const userText = this.extractUserText(dto.message.parts);
-    if (!userText) {
-      throw new BadRequestException(
-        'message.parts must contain at least one non-empty text part',
-      );
-    }
-
-    const imageParts = this.extractImageParts(dto.message.parts);
-    const history = this.db.connection
-      .prepare(
-        `SELECT id, session_id, turn_id, role, content, parts_json, created_at, seq
-           FROM messages WHERE session_id = ? ORDER BY seq ASC`,
-      )
-      .all(sessionId) as ConversationMessage[];
-
-    const identity = this.personaIdentity.prepareCapsule({
-      personaId: session.persona_id,
-      userId: session.user_id,
-      sessionId,
-      occurredAt: dto.message.occurredAt,
-    });
-    const llmParts: LlmInputPart[] = imageParts.map((p) => ({
-      type: 'image' as const,
-      ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
-      ...(p.imageBase64 ? { imageBase64: p.imageBase64 } : {}),
-      ...(p.mimeType ? { mimeType: p.mimeType } : {}),
-    }));
-
+  loadSession(sessionId: string, authUserId: string): LoadedSession {
+    const row = this.loadSessionRow(sessionId, authUserId);
     return {
-      userText,
-      imageParts,
-      identity,
-      history,
-      llmParts,
+      id: row.id,
+      userId: row.user_id,
+      personaId: row.persona_id,
     };
   }
 
   /**
-   * Atomically appends user + assistant messages for one turn and bumps
-   * the session's `updated_at`. Returns the generated identifiers and
-   * timestamp the caller should surface to clients.
+   * Atomically appends user + assistant messages for one turn and
+   * bumps `sessions.updated_at`. Returns identifiers and the assistant
+   * message's `seq` so the orchestrator can include it in the
+   * fire-and-forget `session.observed` notification to the fragmenter.
    */
-  persistTurn(args: {
+  appendTurn(args: {
     sessionId: string;
     turnId?: string;
     parts: InputPartDto[];
     userText: string;
     occurredAt: string;
     assistantText: string;
-  }): PersistedTurn {
+  }): AppendedTurn {
     const turnId = args.turnId ?? randomUUID();
     const userMessageId = randomUUID();
     const assistantMessageId = randomUUID();
@@ -285,14 +237,7 @@ export class ChatService {
     };
   }
 
-  /**
-   * Verifies the session exists and belongs to the authenticated user.
-   */
-  assertSessionOwnership(sessionId: string, authUserId: string): void {
-    this.loadSession(sessionId, authUserId);
-  }
-
-  private loadSession(sessionId: string, authUserId: string): SessionRow {
+  private loadSessionRow(sessionId: string, authUserId: string): SessionRow {
     const row = this.db.connection
       .prepare(`SELECT * FROM sessions WHERE id = ?`)
       .get(sessionId) as SessionRow | undefined;
@@ -301,41 +246,6 @@ export class ChatService {
       throw new ForbiddenException('Session belongs to a different user');
     }
     return row;
-  }
-
-  private extractUserText(parts: InputPartDto[]): string {
-    return parts
-      .filter((p) => p.type === 'text')
-      .map((p) => p.text ?? '')
-      .filter((t) => t.trim().length > 0)
-      .join('\n')
-      .trim();
-  }
-
-  private extractImageParts(parts: InputPartDto[]): ChatImagePart[] {
-    const out: ChatImagePart[] = [];
-    for (const p of parts) {
-      if (p.type !== 'image') continue;
-      if (p.imageId) {
-        throw new BadRequestException(
-          'imageId resolution is not yet supported; send imageUrl or imageBase64',
-        );
-      }
-
-      const sourceCount = (p.imageUrl ? 1 : 0) + (p.imageBase64 ? 1 : 0);
-      if (sourceCount !== 1) {
-        throw new BadRequestException(
-          'image parts must include exactly one of imageUrl or imageBase64',
-        );
-      }
-
-      out.push({
-        ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
-        ...(p.imageBase64 ? { imageBase64: p.imageBase64 } : {}),
-        ...(p.mimeType ? { mimeType: p.mimeType } : {}),
-      });
-    }
-    return out;
   }
 
   private redactPersistedParts(parts: InputPartDto[]): InputPartDto[] {
@@ -347,4 +257,50 @@ export class ChatService {
       };
     });
   }
+}
+
+/**
+ * Returns the user-visible text from the input parts, raising
+ * BadRequestException when no text part is present. Used by the
+ * conversation flow to bridge incoming DTOs to the loop.
+ */
+export function extractUserText(parts: InputPartDto[]): string {
+  return parts
+    .filter((p) => p.type === 'text')
+    .map((p) => p.text ?? '')
+    .filter((t) => t.trim().length > 0)
+    .join('\n')
+    .trim();
+}
+
+export interface ChatImagePart {
+  imageUrl?: string;
+  imageBase64?: string;
+  mimeType?: string;
+}
+
+export function extractImageParts(parts: InputPartDto[]): ChatImagePart[] {
+  const out: ChatImagePart[] = [];
+  for (const p of parts) {
+    if (p.type !== 'image') continue;
+    if (p.imageId) {
+      throw new BadRequestException(
+        'imageId resolution is not yet supported; send imageUrl or imageBase64',
+      );
+    }
+
+    const sourceCount = (p.imageUrl ? 1 : 0) + (p.imageBase64 ? 1 : 0);
+    if (sourceCount !== 1) {
+      throw new BadRequestException(
+        'image parts must include exactly one of imageUrl or imageBase64',
+      );
+    }
+
+    out.push({
+      ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
+      ...(p.imageBase64 ? { imageBase64: p.imageBase64 } : {}),
+      ...(p.mimeType ? { mimeType: p.mimeType } : {}),
+    });
+  }
+  return out;
 }
