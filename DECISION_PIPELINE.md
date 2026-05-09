@@ -251,12 +251,15 @@ async <name>(args): Promise<<typed result>>
 }
 ```
 
-Initial method set, in order of dependency:
+Initial method set, in order of dependency. **Each method is a pure
+function of its one or two narrow inputs.** Adding parameters is the
+exact mistake the original control prompt made; we resist it by
+default and only add a parameter when a real failure case forces it.
 
 ```ts
 class DecisionsService {
   /** Should the orchestrator search before answering? */
-  needsSearch(userText: string, recentHistory: Pick<ConversationMessage, 'role' | 'content'>[]): Promise<boolean>;
+  needsSearch(userText: string): Promise<boolean>;
 
   /** Does an accurate answer require the user's real-world location? */
   needsLocation(userText: string): Promise<boolean>;
@@ -271,6 +274,31 @@ class DecisionsService {
   evidenceSufficient(userText: string, query: string, evidenceTitles: string[]): Promise<boolean>;
 }
 ```
+
+`generateSearchQuery` and `evidenceSufficient` take an extra argument
+because the LLM strictly cannot do its job without it (a query needs
+the city to be location-accurate; sufficiency needs to see what came
+back). `needsSearch`, `needsLocation`, and `needsThinking` are pure
+functions of `userText`. No history. No persona. No prior
+observations.
+
+### About elliptical follow-ups
+
+Pure-`userText` decisions can mis-classify follow-ups like "and
+Cluj?" after a "weather in Bucharest" turn — there's nothing in the
+isolated string to flag it as a search query. If we observe this in
+production, the right answer is **not** to thread `recentHistory`
+into every decision. It is to add one new upstream step:
+
+```ts
+resolveSelfContained(userText: string, recentHistory: ConversationMessage[]): Promise<string>
+```
+
+That step expands ellipticals into a self-contained question once,
+near the start of the pipeline. Every later decision keeps its tight
+single-input signature and runs against the resolved string. The
+history-aware concern lives in exactly one place. Build it only when
+the failure mode actually shows up.
 
 Five methods. Each is a single ~80-token prompt. Each is cancellable
 via the same abort signal. Each is independently revisable without
