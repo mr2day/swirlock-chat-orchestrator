@@ -7,9 +7,6 @@ import { AgentTraceService } from './agent-trace.service';
 import { ChatService } from './chat.service';
 import { ChatStreamHandler } from './chat-stream.handler';
 import { PersonaIdentityService } from './persona-identity.service';
-import { PromptBuilderService } from './prompt-builder.service';
-import { TurnPlannerService } from './turn-planner.service';
-import { UtilityTurnClassifierService } from './utility-turn-classifier.service';
 
 @Module({
   imports: [AuthModule, LlmHostModule, RagModule],
@@ -19,9 +16,6 @@ import { UtilityTurnClassifierService } from './utility-turn-classifier.service'
     ChatService,
     ChatStreamHandler,
     PersonaIdentityService,
-    TurnPlannerService,
-    UtilityTurnClassifierService,
-    PromptBuilderService,
   ],
   exports: [ChatStreamHandler],
 })

@@ -1,42 +1,8 @@
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
-import type { ServiceConfig } from '../config/config';
 import type { AgentLoopService } from './agent-loop.service';
 import type { ChatService, PreparedAgentTurn } from './chat.service';
 import { ChatStreamHandler } from './chat-stream.handler';
-
-const CONFIG: ServiceConfig = {
-  serviceName: 'swirlock-chat-orchestrator',
-  host: '127.0.0.1',
-  port: 3200,
-  apiVersion: 'v4',
-  devUser: {
-    userId: 'dev-user',
-    displayName: 'Dev User',
-    bearerToken: 'dev-token-change-me',
-  },
-  database: { file: ':memory:' },
-  llmHost: {
-    baseUrl: 'http://127.0.0.1:3213',
-    callerService: 'chat-orchestrator',
-    timeoutMs: 120000,
-  },
-  utilityLlmHost: {
-    baseUrl: 'http://127.0.0.1:3213',
-    callerService: 'chat-orchestrator:turn-classifier',
-    timeoutMs: 30000,
-    priority: 50,
-  },
-  rag: {
-    enabled: true,
-    baseUrl: 'http://127.0.0.1:3001',
-    callerService: 'chat-orchestrator',
-    timeoutMs: 90000,
-    freshness: 'medium',
-    allowedModes: ['local_rag', 'live_web'],
-    maxEvidenceChunks: 8,
-  },
-};
 
 const SIMPLE_PREPARED_TURN: PreparedAgentTurn = {
   userText: 'hello',
@@ -125,7 +91,6 @@ function makeHandler(agentRun: jest.MockedFunction<AgentLoopService['run']>): {
     persistTurn,
   } as Pick<ChatService, 'prepareAgentTurn' | 'persistTurn'>;
   const handler = new ChatStreamHandler(
-    CONFIG,
     chat as ChatService,
     {
       run: agentRun,

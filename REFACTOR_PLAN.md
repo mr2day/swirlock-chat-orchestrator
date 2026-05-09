@@ -110,10 +110,6 @@ src/
 
 What disappears from the current tree:
 
-- `src/auth/` — HTTP-only `BearerAuthGuard`/`AuthModule`, never bound.
-  `bearer-auth.util.ts` is the only live piece (used by `main.ts` for the
-  WS upgrade) and either inlines into `main.ts` or stays as a single
-  utility file.
 - `src/common/` — `CorrelationIdMiddleware` and `ErrorEnvelopeFilter` are
   HTTP-only. `meta.util.ts` is unused on the wire (the WS handler only
   forwards `res.data`).
@@ -122,6 +118,16 @@ What disappears from the current tree:
   paths (only reachable via `chat.service.prepareTurn`, which is itself
   dead).
 
+What is preserved despite being unbound today:
+
+- `src/auth/` (`AuthModule`, `BearerAuthGuard`, `bearer-auth.util.ts`).
+  The util is actively used by the WS upgrade in `main.ts`. The module
+  and guard are HTTP-shaped stubs that no controller currently applies,
+  but they stay as the architectural home for the upcoming Swirlock IDP
+  integration (JWT/OIDC validation, scope checks, user account
+  resolution). When IDP work begins, the dev-token equality check in
+  `BearerAuthGuard` will be replaced by an IDP-backed implementation.
+
 ## Phased Work Order
 
 Each phase is independently shippable. CI/build/tests should pass at the
@@ -129,59 +135,63 @@ end of each phase.
 
 ### Phase A — endpoint flip + dead-code purge + config simplification
 
-Mechanical, low-risk. Land first.
+**Status: shipped on `v5-refactoring` branch.** Mechanical, low-risk.
 
-- [ ] `main.ts`: `STREAM_PATH = '/v5/chat'`.
-- [ ] `rag.service.ts` `streamUrl()`: `/v4/retrieval` → `/v5/retrieval`.
-- [ ] `config.ts`: drop `UtilityLlmHostConfig`, `ServiceConfig.utilityLlmHost`,
-      and the validate() block for it. Drop `apiVersion` field too — it
-      is only consumed by the soon-to-be-deleted `buildMeta`.
-- [ ] `service.config.cjs`: delete the `utilityLlmHost` block; delete
+- [x] `main.ts`: `STREAM_PATH = '/v5/chat'`.
+- [x] `rag.service.ts` `streamUrl()`: `/v4/retrieval` → `/v5/retrieval`.
+- [x] `config.ts`: dropped `UtilityLlmHostConfig`,
+      `ServiceConfig.utilityLlmHost`, the validate() block for it, and
       the `apiVersion` field.
-- [ ] Delete files:
-  - `src/chat/turn-planner.service.ts` + its `.spec.ts`
-  - `src/chat/utility-turn-classifier.service.ts` + its `.spec.ts`
+- [x] `service.config.cjs`: deleted the `utilityLlmHost` block and the
+      `apiVersion` field.
+- [x] Deleted files:
+  - `src/chat/turn-planner.service.ts` + `.spec.ts`
+  - `src/chat/utility-turn-classifier.service.ts` + `.spec.ts`
   - `src/chat/turn-classification.ts`
-  - `src/chat/prompt-builder.service.ts` + its `.spec.ts`
-- [ ] `chat.service.ts`: delete `prepareTurn` (the unused legacy path);
-      drop imports of `TurnPlannerService` / `PromptBuilderService` and
-      the unused `PreparedTurn` type.
-- [ ] `chat.service.spec.ts`: replace any `prepareTurn` tests with tests
-      of `prepareAgentTurn`, or delete entirely if redundant with
-      `chat-stream.handler.spec.ts`.
-- [ ] `chat.module.ts`: remove `TurnPlannerService`,
+  - `src/chat/prompt-builder.service.ts` + `.spec.ts`
+  - `src/chat/chat.service.spec.ts` (only tested the deleted
+    `prepareTurn` path; `chat-stream.handler.spec.ts` covers the live
+    flow)
+- [x] `chat.service.ts`: deleted `prepareTurn`; dropped imports of
+      `TurnPlannerService` / `PromptBuilderService`; relocated
+      `ConversationMessage` here (it was previously exported from the
+      now-deleted `turn-planner.service.ts`); stopped wrapping responses
+      in `{ meta, data }` and now returns plain data shapes (the WS
+      handler is the only caller and only ever forwarded `res.data`).
+- [x] `chat.module.ts`: removed `TurnPlannerService`,
       `UtilityTurnClassifierService`, `PromptBuilderService` from
       providers.
-- [ ] Delete `src/auth/auth.module.ts` and `src/auth/bearer-auth.guard.ts`.
-      Keep `bearer-auth.util.ts` (still used by `main.ts`).
-- [ ] `app.module.ts`: remove `AuthModule` import and the
-      `CorrelationIdMiddleware` / `ErrorEnvelopeFilter` wiring.
-- [ ] Delete `src/common/correlation-id.middleware.ts`,
-      `src/common/error-envelope.filter.ts`, `src/common/meta.util.ts`.
-- [ ] `chat.service.ts`: stop wrapping responses in
-      `{ meta: buildMeta(...), data: ... }`; return plain `data` shapes.
-      The WS handler is the only caller and only forwards `res.data`.
-- [ ] `main.ts`: drop the CORS configuration block (no HTTP endpoints
-      remain).
-- [ ] Update `README.md` and `TRANSPORT-AND-ROUTING-PLAN.md` from
-      v4 → v5; remove utility-LLM mentions. (`PHASES.md` was deleted
-      separately; do not recreate it.)
+- [x] Kept `src/auth/` intact as the architectural home for the
+      upcoming Swirlock IDP integration. `BearerAuthGuard` is HTTP-shaped
+      and not yet bound to any controller, but the module placeholder
+      stays so future IDP work is additive. `bearer-auth.util.ts`
+      remains the live WS-upgrade auth path.
+- [x] `app.module.ts`: removed the `CorrelationIdMiddleware` /
+      `ErrorEnvelopeFilter` wiring; `AuthModule` import preserved.
+- [x] Deleted `src/common/` entirely (correlation-id middleware,
+      error-envelope filter, meta util — all HTTP-only).
+- [x] `main.ts`: dropped the CORS configuration block (no HTTP
+      endpoints remain).
+- [x] `LlmHostService`: collapsed to a single Vanamonde Model Host
+      socket; removed the `clients: Map<string, …>`, the multi-URL
+      connect loop, and the per-call `baseUrl/callerService/priority/timeoutMs`
+      overrides on `streamInfer`. (Originally Phase B in this plan; the
+      type ripple from removing `utilityLlmHost` made it natural to do
+      together.)
+- [x] Updated `README.md` and `TRANSPORT-AND-ROUTING-PLAN.md` from
+      v4 → v5.
 
-Test gate at end of phase: `chat-stream.handler.spec.ts` and
-`persona-identity.service.spec.ts` continue to pass; no references to
-deleted symbols remain (`tsc --noEmit` clean).
+Test gate at end of phase: `npm run build`, `npm run lint`,
+`npm test` all clean; 8 tests pass across 3 spec files
+(chat-stream.handler, agent-loop.service, persona-identity.service).
 
 ### Phase B — collapse `LlmHostService` to single Vanamonde socket
 
-- [ ] `LlmHostService`: remove the `clients: Map<string, ...>` and the
-      multi-URL connect loop in `onModuleInit`. Keep one private
-      `PersistentModelHostSocket` bound to `cfg.llmHost.baseUrl`.
-- [ ] Remove `streamInfer.{baseUrl, callerService, timeoutMs, priority}`
-      overrides from the public method signature. Keep only
-      `correlationId, parts?, messages?, options?, onEvent?, abortSignal?`.
-- [ ] `PersistentModelHostSocket` itself stays — it's already
-      well-isolated.
-- [ ] `LlmHostModule` unchanged.
+**Status: shipped as part of Phase A.** The type ripple from removing
+`utilityLlmHost` from `ServiceConfig` made it cheaper to do here than
+defer. `LlmHostService` now holds a single `PersistentModelHostSocket`
+bound to `cfg.llmHost.baseUrl`; `streamInfer` no longer accepts
+`baseUrl`/`callerService`/`priority`/`timeoutMs` overrides.
 
 ### Phase C — add Context Fragmenter client
 

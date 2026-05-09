@@ -1,36 +1,17 @@
 import {
   BadRequestException,
   ForbiddenException,
-  Inject,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { SERVICE_CONFIG } from '../config/config';
-import type { ServiceConfig } from '../config/config';
-import { buildMeta } from '../common/meta.util';
 import { DatabaseService } from '../database/database.service';
 import type { LlmInputPart } from '../llm-host/llm-host.service';
-import type { LlmMessage } from '../llm-host/llm-host.service';
-import { RagService } from '../rag/rag.service';
-import type {
-  RagContext,
-  RagInputPart,
-  RetrievalStreamEvent,
-  UserLocation,
-} from '../rag/rag.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import type { InputPartDto, SubmitTurnDto } from './dto/submit-turn.dto';
 import { PersonaIdentityService } from './persona-identity.service';
 import type { PersonaIdentityCapsule } from './persona-identity.service';
-import { PromptBuilderService } from './prompt-builder.service';
-import type {
-  ContextMemoryFragment,
-  ConversationMessage,
-  TurnPlan,
-} from './turn-planner.service';
-import { TurnPlannerService } from './turn-planner.service';
 
 interface SessionRow {
   id: string;
@@ -44,7 +25,7 @@ interface SessionRow {
   updated_at: string;
 }
 
-interface MessageRow {
+export interface ConversationMessage {
   id: string;
   session_id: string;
   turn_id: string;
@@ -59,17 +40,6 @@ interface ChatImagePart {
   imageUrl?: string;
   imageBase64?: string;
   mimeType?: string;
-}
-
-export interface PreparedTurn {
-  userText: string;
-  imageParts: ChatImagePart[];
-  identity: PersonaIdentityCapsule;
-  turnPlan: TurnPlan;
-  memoryFragments: ContextMemoryFragment[];
-  ragContext: RagContext;
-  llmMessages: LlmMessage[];
-  llmParts: LlmInputPart[];
 }
 
 export interface PreparedAgentTurn {
@@ -87,25 +57,45 @@ export interface PersistedTurn {
   createdAt: string;
 }
 
+export interface SessionCreated {
+  sessionId: string;
+  createdAt: string;
+  status: 'active';
+}
+
+export interface SessionSnapshot {
+  sessionId: string;
+  createdAt: string;
+  updatedAt: string;
+  status: string;
+  messages: Array<{
+    messageId: string;
+    turnId: string;
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+    createdAt: string;
+  }>;
+}
+
+export interface SessionDeleted {
+  sessionId: string;
+  deleted: true;
+}
+
 @Injectable()
 export class ChatService {
   private readonly log = new Logger(ChatService.name);
 
   constructor(
-    @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly db: DatabaseService,
     private readonly personaIdentity: PersonaIdentityService,
-    private readonly rag: RagService,
-    private readonly turnPlanner: TurnPlannerService,
-    private readonly promptBuilder: PromptBuilderService,
   ) {}
 
   createSession(args: {
     dto: CreateSessionDto;
-    correlationId: string;
     authUserId: string;
-  }) {
-    const { dto, correlationId, authUserId } = args;
+  }): SessionCreated {
+    const { dto, authUserId } = args;
     if (dto.participant.userId !== authUserId) {
       throw new ForbiddenException(
         'participant.userId does not match authenticated user',
@@ -129,53 +119,38 @@ export class ChatService {
         now,
         now,
       );
-    return {
-      meta: buildMeta(correlationId, this.cfg.apiVersion),
-      data: {
-        sessionId,
-        createdAt: now,
-        status: 'active' as const,
-      },
-    };
+    return { sessionId, createdAt: now, status: 'active' };
   }
 
-  getSession(args: {
-    sessionId: string;
-    correlationId: string;
-    authUserId: string;
-  }) {
-    const { sessionId, correlationId, authUserId } = args;
+  getSession(args: { sessionId: string; authUserId: string }): SessionSnapshot {
+    const { sessionId, authUserId } = args;
     const session = this.loadSession(sessionId, authUserId);
     const messages = this.db.connection
       .prepare(
         `SELECT id, session_id, turn_id, role, content, parts_json, created_at, seq
            FROM messages WHERE session_id = ? ORDER BY seq ASC`,
       )
-      .all(sessionId) as MessageRow[];
+      .all(sessionId) as ConversationMessage[];
     return {
-      meta: buildMeta(correlationId, this.cfg.apiVersion),
-      data: {
-        sessionId: session.id,
-        createdAt: session.created_at,
-        updatedAt: session.updated_at,
-        status: session.status,
-        messages: messages.map((m) => ({
-          messageId: m.id,
-          turnId: m.turn_id,
-          role: m.role,
-          content: m.content,
-          createdAt: m.created_at,
-        })),
-      },
+      sessionId: session.id,
+      createdAt: session.created_at,
+      updatedAt: session.updated_at,
+      status: session.status,
+      messages: messages.map((m) => ({
+        messageId: m.id,
+        turnId: m.turn_id,
+        role: m.role,
+        content: m.content,
+        createdAt: m.created_at,
+      })),
     };
   }
 
   deleteSession(args: {
     sessionId: string;
-    correlationId: string;
     authUserId: string;
-  }) {
-    const { sessionId, correlationId, authUserId } = args;
+  }): SessionDeleted {
+    const { sessionId, authUserId } = args;
     this.loadSession(sessionId, authUserId);
     const tx = this.db.connection.transaction((id: string) => {
       this.db.connection
@@ -184,15 +159,13 @@ export class ChatService {
       this.db.connection.prepare(`DELETE FROM sessions WHERE id = ?`).run(id);
     });
     tx(sessionId);
-    return {
-      meta: buildMeta(correlationId, this.cfg.apiVersion),
-      data: { sessionId, deleted: true },
-    };
+    return { sessionId, deleted: true };
   }
 
   /**
-   * Loads the raw conversational context for the agent-controlled v4 turn path.
-   * This deliberately does not classify, retrieve, or decide model options.
+   * Loads the raw conversational context for the agent-controlled turn path.
+   * This deliberately does not classify, retrieve, or decide model options;
+   * the agent loop owns those decisions.
    */
   prepareAgentTurn(args: {
     sessionId: string;
@@ -235,111 +208,6 @@ export class ChatService {
       imageParts,
       identity,
       history,
-      llmParts,
-    };
-  }
-
-  /**
-   * Loads session, validates auth, normalizes input, fetches RAG context over
-   * WebSocket, and builds the LLM Host input parts for the chat stream.
-   */
-  async prepareTurn(args: {
-    sessionId: string;
-    dto: SubmitTurnDto;
-    correlationId: string;
-    authUserId: string;
-    userLocation?: UserLocation;
-    resolveUserLocation?: () => Promise<UserLocation | null>;
-    onRagStreamEvent?: (event: RetrievalStreamEvent) => void;
-    abortSignal?: AbortSignal;
-  }): Promise<PreparedTurn> {
-    const { sessionId, dto, correlationId, authUserId } = args;
-    const session = this.loadSession(sessionId, authUserId);
-
-    const userText = this.extractUserText(dto.message.parts);
-    if (!userText) {
-      throw new BadRequestException(
-        'message.parts must contain at least one non-empty text part',
-      );
-    }
-    const imageParts = this.extractImageParts(dto.message.parts);
-
-    const history = this.db.connection
-      .prepare(
-        `SELECT id, session_id, turn_id, role, content, parts_json, created_at, seq
-           FROM messages WHERE session_id = ? ORDER BY seq ASC`,
-      )
-      .all(sessionId) as MessageRow[];
-
-    const turnPlan = await this.turnPlanner.plan({
-      correlationId,
-      userText,
-      occurredAt: dto.message.occurredAt,
-      history,
-      defaultFreshness: this.cfg.rag.freshness,
-      defaultAllowedModes: [...this.cfg.rag.allowedModes],
-      abortSignal: args.abortSignal,
-    });
-
-    let userLocation: UserLocation | undefined = args.userLocation;
-    if (
-      !userLocation &&
-      turnPlan.requiresLocation &&
-      args.resolveUserLocation
-    ) {
-      const resolved = await args.resolveUserLocation();
-      if (resolved) {
-        userLocation = resolved;
-      }
-    }
-
-    const ragContext = turnPlan.shouldRetrieve
-      ? await this.rag.retrieve({
-          correlationId,
-          sessionId,
-          userText,
-          parts: this.buildRagParts(dto.message.parts),
-          resolvedQueryText: turnPlan.resolvedQueryText,
-          intent: turnPlan.intent,
-          hints: turnPlan.hints,
-          freshness: turnPlan.freshness,
-          allowedModes: turnPlan.allowedModes,
-          ...(userLocation ? { userLocation } : {}),
-          onStreamEvent: args.onRagStreamEvent,
-          abortSignal: args.abortSignal,
-        })
-      : this.emptyRagContext();
-
-    const identity = this.personaIdentity.prepareCapsule({
-      personaId: session.persona_id,
-      userId: session.user_id,
-      sessionId,
-      occurredAt: dto.message.occurredAt,
-    });
-    const llmMessages = this.promptBuilder.buildMessages({
-      history,
-      userText,
-      occurredAt: dto.message.occurredAt,
-      turnPlan,
-      ragContext,
-      identity,
-      ...(userLocation ? { userLocation } : {}),
-    });
-    const llmParts: LlmInputPart[] = imageParts.map((p) => ({
-      type: 'image' as const,
-      ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
-      ...(p.imageBase64 ? { imageBase64: p.imageBase64 } : {}),
-      ...(p.mimeType ? { mimeType: p.mimeType } : {}),
-    }));
-
-    return {
-      userText,
-      imageParts,
-      identity,
-      turnPlan,
-      memoryFragments: turnPlan.memoryFragments,
-      ragContext,
-      llmMessages,
       llmParts,
     };
   }
@@ -421,8 +289,6 @@ export class ChatService {
 
   /**
    * Verifies the session exists and belongs to the authenticated user.
-   * Used by every chat endpoint, including the streaming one before we
-   * even open the upstream LLM Host connection.
    */
   assertSessionOwnership(sessionId: string, authUserId: string): void {
     this.loadSession(sessionId, authUserId);
@@ -474,26 +340,6 @@ export class ChatService {
     return out;
   }
 
-  private buildRagParts(parts: InputPartDto[]): RagInputPart[] {
-    return parts
-      .map((part) => {
-        if (part.type === 'text') {
-          const text = part.text?.trim() ?? '';
-          return text ? { type: 'text' as const, text } : null;
-        }
-
-        if (!part.imageUrl && !part.imageId) return null;
-
-        return {
-          type: 'image' as const,
-          ...(part.imageUrl ? { imageUrl: part.imageUrl } : {}),
-          ...(part.imageId ? { imageId: part.imageId } : {}),
-          ...(part.mimeType ? { mimeType: part.mimeType } : {}),
-        };
-      })
-      .filter((part): part is RagInputPart => Boolean(part));
-  }
-
   private redactPersistedParts(parts: InputPartDto[]): InputPartDto[] {
     return parts.map((part) => {
       if (part.type !== 'image' || !part.imageBase64) return part;
@@ -502,13 +348,5 @@ export class ChatService {
         imageBase64: '[redacted]',
       };
     });
-  }
-
-  private emptyRagContext(): RagContext {
-    return {
-      retrievalUsed: false,
-      retrievalMode: 'none',
-      evidence: [],
-    };
   }
 }

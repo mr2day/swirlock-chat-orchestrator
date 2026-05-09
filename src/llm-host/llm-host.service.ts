@@ -74,58 +74,44 @@ export interface LlmStreamResult {
 @Injectable()
 export class LlmHostService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(LlmHostService.name);
-  private readonly clients = new Map<string, PersistentModelHostSocket>();
+  private client?: PersistentModelHostSocket;
 
   constructor(@Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig) {}
 
   onModuleInit(): void {
-    const urls = new Set([
-      this.cfg.llmHost.baseUrl,
-      this.cfg.utilityLlmHost?.baseUrl,
-    ]);
-    for (const baseUrl of urls) {
-      if (!baseUrl) continue;
-      void this.clientFor(baseUrl)
-        .connect()
-        .catch((err: Error) => {
-          this.log.warn(
-            `Model Host persistent socket unavailable at startup (${baseUrl}): ${err.message}`,
-          );
-        });
-    }
+    void this.modelHost()
+      .connect()
+      .catch((err: Error) => {
+        this.log.warn(
+          `Vanamonde LLM Host persistent socket unavailable at startup (${this.cfg.llmHost.baseUrl}): ${err.message}`,
+        );
+      });
   }
 
   onModuleDestroy(): void {
-    for (const client of this.clients.values()) {
-      client.close();
-    }
-    this.clients.clear();
+    this.client?.close();
+    this.client = undefined;
   }
 
   /**
-   * Sends one inference request over the persistent upstream Model Host
-   * WebSocket at /v5/model. Callers that need live UI updates provide
-   * `onEvent`; callers such as the Utility turn classifier can omit it and just
-   * read the assembled response text.
+   * Sends one inference request over the persistent Vanamonde LLM Host
+   * WebSocket at `/v5/model`. The orchestrator opens exactly one Model
+   * Host socket per the v5 1:1 module-to-LLM rule; there is no per-call
+   * URL override. Callers that need streaming UI updates provide
+   * `onEvent`.
    */
   async streamInfer(args: {
     correlationId: string;
     parts?: LlmInputPart[];
     messages?: LlmMessage[];
     options?: LlmInferOptions;
-    baseUrl?: string;
-    callerService?: string;
-    priority?: number;
-    timeoutMs?: number;
     onEvent?: (event: LlmStreamEvent) => void;
     abortSignal?: AbortSignal;
   }): Promise<LlmStreamResult> {
-    const result = await this.clientFor(
-      args.baseUrl ?? this.cfg.llmHost.baseUrl,
-    ).streamInfer({
+    const result = await this.modelHost().streamInfer({
       correlationId: args.correlationId,
       request: this.buildInferRequest(args),
-      timeoutMs: args.timeoutMs ?? this.cfg.llmHost.timeoutMs,
+      timeoutMs: this.cfg.llmHost.timeoutMs,
       onEvent: args.onEvent,
       abortSignal: args.abortSignal,
     });
@@ -140,27 +126,17 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
     parts?: LlmInputPart[];
     messages?: LlmMessage[];
     options?: LlmInferOptions;
-    callerService?: string;
-    priority?: number;
   }) {
     return {
-      requestContext: this.buildRequestContext(args),
+      requestContext: {
+        callerService: this.cfg.llmHost.callerService,
+        requestedAt: new Date().toISOString(),
+      },
       input: {
         ...(args.messages ? { messages: args.messages } : {}),
         ...(args.parts ? { parts: args.parts } : {}),
       },
       ...(args.options ? { options: args.options } : {}),
-    };
-  }
-
-  private buildRequestContext(args: {
-    callerService?: string;
-    priority?: number;
-  }) {
-    return {
-      callerService: args.callerService ?? this.cfg.llmHost.callerService,
-      ...(args.priority === undefined ? {} : { priority: args.priority }),
-      requestedAt: new Date().toISOString(),
     };
   }
 
@@ -171,19 +147,15 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
     return 'error';
   }
 
-  private clientFor(baseUrl: string): PersistentModelHostSocket {
-    const normalized = baseUrl.replace(/\/$/, '');
-    const existing = this.clients.get(normalized);
-    if (existing) return existing;
-
-    const client = new PersistentModelHostSocket(
-      normalized,
+  private modelHost(): PersistentModelHostSocket {
+    if (this.client) return this.client;
+    this.client = new PersistentModelHostSocket(
+      this.cfg.llmHost.baseUrl.replace(/\/$/, ''),
       this.cfg.llmHost.timeoutMs,
       this.log,
       (value) => this.normalizeFinishReason(value),
     );
-    this.clients.set(normalized, client);
-    return client;
+    return this.client;
   }
 }
 

@@ -10,7 +10,7 @@ import { ChatStreamHandler } from './chat/chat-stream.handler';
 import { SERVICE_CONFIG } from './config/config';
 import type { ServiceConfig } from './config/config';
 
-const STREAM_PATH = '/v4/chat';
+const STREAM_PATH = '/v5/chat';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
@@ -24,22 +24,6 @@ async function bootstrap(): Promise<void> {
   );
   const cfg = app.get<ServiceConfig>(SERVICE_CONFIG);
   const streamHandler = app.get(ChatStreamHandler);
-
-  const corsOrigins = cfg.http?.corsOrigins ?? [];
-  if (corsOrigins.length > 0) {
-    app.enableCors({
-      origin: corsOrigins,
-      methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Authorization', 'Content-Type', 'x-correlation-id'],
-      exposedHeaders: ['x-correlation-id'],
-      credentials: false,
-      maxAge: 600,
-    });
-    Logger.log(
-      `CORS enabled for ${corsOrigins.length} origin(s): ${corsOrigins.join(', ')}`,
-      'Bootstrap',
-    );
-  }
 
   await app.listen(cfg.port, cfg.host);
 

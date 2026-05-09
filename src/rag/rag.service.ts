@@ -522,7 +522,7 @@ class PersistentRagSocket {
       this.baseUrl
         .replace(/^http:/i, 'ws:')
         .replace(/^https:/i, 'wss:')
-        .replace(/\/$/, '') + '/v4/retrieval'
+        .replace(/\/$/, '') + '/v5/retrieval'
     );
   }
 }

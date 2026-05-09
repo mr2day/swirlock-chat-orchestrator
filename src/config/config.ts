@@ -16,10 +16,6 @@ export interface LlmHostConfig {
   timeoutMs: number;
 }
 
-export interface UtilityLlmHostConfig extends LlmHostConfig {
-  priority: number;
-}
-
 export interface RagConfig {
   enabled: boolean;
   baseUrl: string | null;
@@ -30,26 +26,14 @@ export interface RagConfig {
   maxEvidenceChunks: number;
 }
 
-export interface HttpConfig {
-  /**
-   * Origins allowed by CORS preflight. The browser blocks cross-origin
-   * `fetch` to the orchestrator unless its `Origin` header matches one of
-   * these entries. Empty list disables CORS entirely.
-   */
-  corsOrigins: string[];
-}
-
 export interface ServiceConfig {
   serviceName: string;
   host: string;
   port: number;
-  apiVersion: string;
   devUser: DevUserConfig;
   database: DatabaseConfig;
   llmHost: LlmHostConfig;
-  utilityLlmHost?: UtilityLlmHostConfig;
   rag: RagConfig;
-  http?: HttpConfig;
 }
 
 export const SERVICE_CONFIG = Symbol('SERVICE_CONFIG');
@@ -72,32 +56,12 @@ function validate(c: ServiceConfig): void {
   must(c.host, 'host required');
   must(c.serviceName, 'serviceName required');
   must(typeof c.port === 'number' && c.port > 0, 'port required');
-  must(
-    typeof c.apiVersion === 'string' && c.apiVersion.length > 0,
-    'apiVersion required',
-  );
   must(c.devUser?.userId, 'devUser.userId required');
   must(c.devUser?.bearerToken, 'devUser.bearerToken required');
   must(c.database?.file, 'database.file required');
   must(c.llmHost?.baseUrl, 'llmHost.baseUrl required');
   must(c.llmHost?.callerService, 'llmHost.callerService required');
   must(typeof c.llmHost?.timeoutMs === 'number', 'llmHost.timeoutMs required');
-  if (c.utilityLlmHost !== undefined) {
-    must(c.utilityLlmHost.baseUrl, 'utilityLlmHost.baseUrl required');
-    must(
-      c.utilityLlmHost.callerService,
-      'utilityLlmHost.callerService required',
-    );
-    must(
-      typeof c.utilityLlmHost.timeoutMs === 'number',
-      'utilityLlmHost.timeoutMs required',
-    );
-    must(
-      typeof c.utilityLlmHost.priority === 'number' &&
-        Number.isFinite(c.utilityLlmHost.priority),
-      'utilityLlmHost.priority must be a finite number',
-    );
-  }
   must(typeof c.rag?.enabled === 'boolean', 'rag.enabled required');
   if (!c.rag) throw new Error('service.config.cjs invalid: rag required');
   const rag = c.rag;
@@ -117,15 +81,4 @@ function validate(c: ServiceConfig): void {
     'rag.maxEvidenceChunks required',
   );
   must(!rag.enabled || rag.baseUrl, 'rag.baseUrl required when enabled');
-
-  if (c.http !== undefined) {
-    must(
-      Array.isArray(c.http.corsOrigins),
-      'http.corsOrigins must be an array of origin strings',
-    );
-    must(
-      c.http.corsOrigins.every((o) => typeof o === 'string' && o.length > 0),
-      'http.corsOrigins entries must be non-empty strings',
-    );
-  }
 }

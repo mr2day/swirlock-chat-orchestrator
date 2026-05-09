@@ -1,6 +1,5 @@
 import {
   HttpException,
-  Inject,
   Injectable,
   Logger,
   ServiceUnavailableException,
@@ -9,8 +8,6 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
-import { SERVICE_CONFIG } from '../config/config';
-import type { ServiceConfig } from '../config/config';
 import type { RetrievalStreamEvent } from '../rag/rag.service';
 import type { UserLocation } from '../rag/rag.service';
 import { AgentLoopService } from './agent-loop.service';
@@ -65,7 +62,6 @@ export class ChatStreamHandler {
   private readonly log = new Logger(ChatStreamHandler.name);
 
   constructor(
-    @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly chat: ChatService,
     private readonly agentLoop: AgentLoopService,
   ) {}
@@ -193,45 +189,42 @@ export class ChatStreamHandler {
         this.requirePayloadRequest(envelope),
       );
       await this.validateDto(dto);
-      const res = this.chat.createSession({
+      const data = this.chat.createSession({
         dto,
-        correlationId: envelope.correlationId,
         authUserId: ctx.authUserId,
       });
       this.send(ws, {
         type: 'session.created',
         correlationId: envelope.correlationId,
-        payload: res.data,
+        payload: data,
       });
       return;
     }
 
     if (envelope.type === 'session.get') {
       const sessionId = this.requireSessionId(envelope);
-      const res = this.chat.getSession({
+      const data = this.chat.getSession({
         sessionId,
-        correlationId: envelope.correlationId,
         authUserId: ctx.authUserId,
       });
       this.send(ws, {
         type: 'session.snapshot',
         correlationId: envelope.correlationId,
-        payload: res.data,
+        payload: data,
       });
       return;
     }
 
     if (envelope.type === 'session.delete') {
       const sessionId = this.requireSessionId(envelope);
-      const res = this.chat.deleteSession({
+      const data = this.chat.deleteSession({
         sessionId,
-        correlationId: envelope.correlationId,
         authUserId: ctx.authUserId,
       });
       this.send(ws, {
         type: 'session.deleted',
         correlationId: envelope.correlationId,
-        payload: res.data,
+        payload: data,
       });
       return;
     }
