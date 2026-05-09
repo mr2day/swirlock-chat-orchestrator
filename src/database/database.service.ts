@@ -40,6 +40,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   private migrate(): void {
+    this.renameLegacyAgentEvents();
     this.connection.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
@@ -111,7 +112,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       CREATE INDEX IF NOT EXISTS idx_persona_identity_facts_lookup
         ON persona_identity_facts(persona_id, importance, fact_type);
 
-      CREATE TABLE IF NOT EXISTS agent_events (
+      CREATE TABLE IF NOT EXISTS decision_events (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         turn_id TEXT NOT NULL,
@@ -124,11 +125,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         seq INTEGER NOT NULL
       );
 
-      CREATE INDEX IF NOT EXISTS idx_agent_events_session_seq
-        ON agent_events(session_id, seq);
+      CREATE INDEX IF NOT EXISTS idx_decision_events_session_seq
+        ON decision_events(session_id, seq);
 
-      CREATE INDEX IF NOT EXISTS idx_agent_events_turn_seq
-        ON agent_events(turn_id, seq);
+      CREATE INDEX IF NOT EXISTS idx_decision_events_turn_seq
+        ON decision_events(turn_id, seq);
 
       CREATE TABLE IF NOT EXISTS agent_plans (
         id TEXT PRIMARY KEY,
@@ -159,6 +160,35 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
       CREATE INDEX IF NOT EXISTS idx_agent_plan_steps_plan
         ON agent_plan_steps(plan_id, step_index);
+    `);
+  }
+
+  /**
+   * Phase F1 of the v5 refactor renames `agent_events` to
+   * `decision_events`. The semantic became "decisions taken by the
+   * orchestrator flow"; the `agent_*` prefix is reserved for the
+   * future agent surface (`agent_plans`, `agent_plan_steps` stay).
+   *
+   * If the legacy table exists, rename it in place and recreate the
+   * indexes. Idempotent: if the rename has already happened, this is
+   * a no-op.
+   */
+  private renameLegacyAgentEvents(): void {
+    const legacy = this.connection
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='agent_events'`,
+      )
+      .get() as { name: string } | undefined;
+    if (!legacy) return;
+
+    this.log.log(
+      'Migrating legacy agent_events table to decision_events (Phase F1).',
+    );
+
+    this.connection.exec(`
+      DROP INDEX IF EXISTS idx_agent_events_session_seq;
+      DROP INDEX IF EXISTS idx_agent_events_turn_seq;
+      ALTER TABLE agent_events RENAME TO decision_events;
     `);
   }
 }

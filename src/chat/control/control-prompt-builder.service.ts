@@ -4,7 +4,7 @@ import type { UserLocation } from '../../rag/rag.service';
 import type { AgentObservation } from '../commands/agent-command.types';
 import type { ConversationMessage } from '../conversation/conversation-history.service';
 import type { PersonaIdentityCapsule } from '../persona/persona-identity.service';
-import { AgentTraceService } from '../trace/agent-trace.service';
+import { DecisionTraceService } from '../trace/decision-trace.service';
 
 export const MAX_AGENT_STEPS = 8;
 
@@ -36,7 +36,7 @@ export interface BuildControlPromptInput {
  */
 @Injectable()
 export class ControlPromptBuilderService {
-  constructor(private readonly trace: AgentTraceService) {}
+  constructor(private readonly trace: DecisionTraceService) {}
 
   buildMessages(input: BuildControlPromptInput): LlmMessage[] {
     const messages: LlmMessage[] = [

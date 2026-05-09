@@ -3,6 +3,7 @@ import { AuthModule } from '../auth/auth.module';
 import { FragmenterModule } from '../fragmenter/fragmenter.module';
 import { LlmHostModule } from '../llm-host/llm-host.module';
 import { RagModule } from '../rag/rag.module';
+import { CappingModule } from './capping/capping.module';
 import { ChatSessionService } from './chat-session.service';
 import { ChatStreamHandler } from './chat-stream.handler';
 import { AgentContinueOptionsCommand } from './commands/agent-continue-options.command';
@@ -15,9 +16,10 @@ import { ControlPromptBuilderService } from './control/control-prompt-builder.se
 import { ConversationFlowService } from './conversation/conversation-flow.service';
 import { ConversationHistoryService } from './conversation/conversation-history.service';
 import { ConversationPromptBuilderService } from './conversation/conversation-prompt-builder.service';
+import { DecisionsModule } from './decisions/decisions.module';
 import { LocationModule } from './location/location.module';
 import { PersonaIdentityService } from './persona/persona-identity.service';
-import { AgentTraceService } from './trace/agent-trace.service';
+import { DecisionTraceService } from './trace/decision-trace.service';
 
 @Module({
   imports: [
@@ -26,6 +28,8 @@ import { AgentTraceService } from './trace/agent-trace.service';
     RagModule,
     FragmenterModule,
     LocationModule,
+    CappingModule,
+    DecisionsModule,
   ],
   providers: [
     ChatSessionService,
@@ -35,7 +39,7 @@ import { AgentTraceService } from './trace/agent-trace.service';
     ConversationPromptBuilderService,
     ControlLoopService,
     ControlPromptBuilderService,
-    AgentTraceService,
+    DecisionTraceService,
     PersonaIdentityService,
     RagRetrieveCommand,
     LocationRequestCommand,

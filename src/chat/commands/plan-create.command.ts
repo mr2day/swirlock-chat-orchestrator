@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { AgentTraceService } from '../trace/agent-trace.service';
+import { DecisionTraceService } from '../trace/decision-trace.service';
 import type {
   AgentCommand,
   AgentCommandContext,
@@ -11,7 +11,7 @@ import { isRecord, stringArg } from './command-utils';
 export class PlanCreateCommand implements AgentCommand {
   readonly name = 'plan.create';
 
-  constructor(private readonly trace: AgentTraceService) {}
+  constructor(private readonly trace: DecisionTraceService) {}
 
   startedSummary(): string {
     return 'Creating a plan';

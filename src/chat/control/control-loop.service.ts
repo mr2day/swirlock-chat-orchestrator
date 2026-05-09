@@ -26,7 +26,7 @@ import type {
 } from '../conversation/conversation-history.service';
 import { ConversationPromptBuilderService } from '../conversation/conversation-prompt-builder.service';
 import type { PersonaIdentityCapsule } from '../persona/persona-identity.service';
-import { AgentTraceService } from '../trace/agent-trace.service';
+import { DecisionTraceService } from '../trace/decision-trace.service';
 import { parseAgentFrame } from './control-frame-parser';
 import {
   ControlPromptBuilderService,
@@ -100,7 +100,7 @@ export class ControlLoopService {
 
   constructor(
     private readonly llm: LlmHostService,
-    private readonly trace: AgentTraceService,
+    private readonly trace: DecisionTraceService,
     private readonly controlPrompt: ControlPromptBuilderService,
     private readonly conversationPrompt: ConversationPromptBuilderService,
     ragRetrieve: RagRetrieveCommand,

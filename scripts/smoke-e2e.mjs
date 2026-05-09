@@ -83,7 +83,9 @@ ws.on("message", (raw) => {
               parts: [
                 {
                   type: "text",
-                  text: "Spune-mi cu un singur cuvant in romaneste cu ce e construita Statuia Libertatii.",
+                  text:
+                    process.env.SMOKE_QUERY ??
+                    "Spune-mi cu un singur cuvant in romaneste cu ce e construita Statuia Libertatii.",
                 },
               ],
               occurredAt: new Date().toISOString(),
@@ -170,6 +172,13 @@ if (!summaryRow) {
 }
 
 function cleanup(exitCode) {
+  if (process.env.SMOKE_NO_CLEANUP === '1') {
+    console.log(`[smoke] SMOKE_NO_CLEANUP=1; leaving session ${sessionId} in DB`);
+    try { ws.close(); } catch {}
+    db.close();
+    process.exit(exitCode);
+    return;
+  }
   try {
     if (sessionId) {
       db.prepare(
@@ -179,10 +188,7 @@ function cleanup(exitCode) {
         `DELETE FROM fragmenter_consolidation_runs WHERE session_id = ?`,
       ).run(sessionId);
       db.prepare(`DELETE FROM messages WHERE session_id = ?`).run(sessionId);
-      db.prepare(`DELETE FROM agent_events WHERE session_id = ?`).run(
-        sessionId,
-      );
-      db.prepare(`DELETE FROM persona_life_events WHERE session_id = ?`).run(
+      db.prepare(`DELETE FROM decision_events WHERE session_id = ?`).run(
         sessionId,
       );
       db.prepare(`DELETE FROM sessions WHERE id = ?`).run(sessionId);

@@ -28,7 +28,7 @@ export interface AgentPlanSnapshot {
   }>;
 }
 
-interface AgentEventRow {
+interface DecisionEventRow {
   event_type: string;
   command: string | null;
   summary: string;
@@ -50,8 +50,21 @@ interface AgentPlanStepRow {
   note: string | null;
 }
 
+/**
+ * Records every orchestrator-flow decision into `decision_events`.
+ *
+ * Despite the surviving plan-storage methods (`createPlan`,
+ * `updatePlanStep`, `activePlanSummary`, etc.) which manipulate the
+ * `agent_plans` / `agent_plan_steps` tables, this class is named
+ * after its primary responsibility: tracing the decisions taken by
+ * orchestrator flow. The `agent_*` prefix is reserved for the
+ * future agent-surface state per
+ * [`VISION.md`](../../../VISION.md). When the agent surface lands,
+ * the plan-management methods migrate to a dedicated
+ * `AgentPlanService`; until then they ride along here.
+ */
 @Injectable()
-export class AgentTraceService {
+export class DecisionTraceService {
   constructor(private readonly db: DatabaseService) {}
 
   recordEvent(args: {
@@ -67,7 +80,7 @@ export class AgentTraceService {
     const seq = this.nextEventSeq(args.sessionId);
     this.db.connection
       .prepare(
-        `INSERT INTO agent_events
+        `INSERT INTO decision_events
            (id, session_id, turn_id, correlation_id, event_type, command, summary, payload_json, created_at, seq)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
@@ -87,7 +100,7 @@ export class AgentTraceService {
 
   /**
    * Builds an objective, language-agnostic summary of what happened in a
-   * specific prior assistant turn, derived from `agent_events` for that
+   * specific prior assistant turn, derived from `decision_events` for that
    * turn_id. Used by the agent control step to substitute into history
    * in place of the raw assistant prose, so the control LLM's tool-use
    * decision is grounded in the *actions* taken last time, not in the
@@ -99,13 +112,13 @@ export class AgentTraceService {
    * `[prior-turn: rag.retrieve("Grindeanu...")=>6 evidence; final answer delivered]`,
    * or `[prior-turn: final answer delivered]` if no commands ran, or
    * `[prior-turn: no orchestrator trace available]` for legacy turns
-   * predating the agent_events table.
+   * predating the decision_events table.
    */
   summarizePriorAssistantTurn(sessionId: string, turnId: string): string {
     const rows = this.db.connection
       .prepare(
         `SELECT event_type, command, summary, payload_json
-           FROM agent_events
+           FROM decision_events
           WHERE session_id = ? AND turn_id = ?
           ORDER BY seq ASC`,
       )
@@ -220,12 +233,12 @@ export class AgentTraceService {
     const rows = this.db.connection
       .prepare(
         `SELECT event_type, command, summary, created_at
-           FROM agent_events
+           FROM decision_events
           WHERE session_id = ?
           ORDER BY seq DESC
           LIMIT ?`,
       )
-      .all(sessionId, limit) as AgentEventRow[];
+      .all(sessionId, limit) as DecisionEventRow[];
 
     if (rows.length === 0) return null;
 
@@ -358,7 +371,7 @@ export class AgentTraceService {
     const row = this.db.connection
       .prepare(
         `SELECT COALESCE(MAX(seq), 0) AS maxSeq
-           FROM agent_events
+           FROM decision_events
           WHERE session_id = ?`,
       )
       .get(sessionId) as { maxSeq: number };

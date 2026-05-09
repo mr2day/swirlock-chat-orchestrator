@@ -323,6 +323,37 @@ export class ChatStreamHandler {
           }
         },
         onFinalChunk: (text) => send('turn.chunk', { text }),
+        onPhaseEvent: (event) => {
+          switch (event.type) {
+            case 'started':
+              send('turn.phase.started', {
+                phase: event.phase,
+                label: event.label,
+                startedAt: new Date().toISOString(),
+              });
+              return;
+            case 'token':
+              send('turn.phase.token', {
+                phase: event.phase,
+                text: event.text,
+              });
+              return;
+            case 'completed':
+              send('turn.phase.completed', {
+                phase: event.phase,
+                ...(event.label !== undefined ? { label: event.label } : {}),
+                ...(event.result !== undefined ? { result: event.result } : {}),
+                completedAt: new Date().toISOString(),
+              });
+              return;
+            case 'failed':
+              send('turn.phase.failed', {
+                phase: event.phase,
+                message: event.message,
+              });
+              return;
+          }
+        },
         resolveUserLocation: () =>
           this.requestLocationFromUi(
             ws,

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { AgentTraceService } from '../trace/agent-trace.service';
-import type { AgentPlanStepStatus } from '../trace/agent-trace.service';
+import { DecisionTraceService } from '../trace/decision-trace.service';
+import type { AgentPlanStepStatus } from '../trace/decision-trace.service';
 import type {
   AgentCommand,
   AgentCommandContext,
@@ -20,7 +20,7 @@ const PLAN_STATUSES: AgentPlanStepStatus[] = [
 export class PlanUpdateCommand implements AgentCommand {
   readonly name = 'plan.update';
 
-  constructor(private readonly trace: AgentTraceService) {}
+  constructor(private readonly trace: DecisionTraceService) {}
 
   startedSummary(): string {
     return 'Updating the plan';
