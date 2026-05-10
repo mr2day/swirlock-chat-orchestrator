@@ -41,6 +41,26 @@ const LANGUAGE_RULE =
   'switched language on this turn, switch with them on the same turn — ' +
   "do not carry the previous turn's language over.";
 
+/**
+ * Injected into the answer-round system message ONLY when this turn has
+ * fulfilled context (search/lookup results). Without it, gemma3:12b
+ * cheerfully weaves narratives from name-similar but unrelated sources
+ * — observed in production: a search for "Florentina Bolojan" (a
+ * private citizen with no public record) returned a result about
+ * Florentina *Ioniță* (head of the Central Military Hospital) and the
+ * model declared them the same person. The rule is deliberately heavy
+ * — it goes against the keep-the-system-message-tiny principle — but
+ * it only applies when search results are present, and on search
+ * turns the model is in fact-summarising mode anyway, not chitchat.
+ */
+const SOURCE_GROUNDING_RULE = [
+  'You will see "Information gathered for this turn" with search results in the user message. Treat them strictly:',
+  '- State ONLY facts explicitly supported by the sources. If a fact is not in any source, say you do not know — do not guess, do not extrapolate.',
+  '- Names: people with the same first name are NOT the same person. If a source talks about someone whose full name does not match the entity the user is asking about, the source is about a different person — ignore it. Never claim that someone "is also known as" a different surname unless a source explicitly states the alias.',
+  '- If none of the sources actually address the user\'s question, say so honestly. Tell the user the search results were not about the topic, instead of fabricating an answer from unrelated material.',
+  '- Do not stitch unrelated sources into a single narrative. Each fact must trace back to a source that is genuinely on-topic.',
+].join('\n');
+
 const PUBLIC_INFO_RULE =
   'Public information about public figures (filmographies, public ' +
   'relationships, careers, biographies) is not private. Do not refuse to ' +
@@ -143,19 +163,21 @@ export function buildAnswerPrompt(args: {
   history: HistoryTurn[];
   personaSystemPrompt: string | null;
 }): LlmMessage[] {
-  // System message contains ONLY the persona prompt. Anything more —
-  // even a single "always reply in the user's language" line — primes
-  // the model into a flatter, policy-document tone. Empirically (see
-  // scripts/replay-gigi.mjs in swirlock-idp-base):
-  //   - persona + 4 cross-cutting rules  → "I am functioning optimally."
-  //   - persona + LANGUAGE_RULE          → "I am well, thank you!"
-  //   - persona alone                    → "My circuits are humming!"
-  // Language switching still works without LANGUAGE_RULE: the model
-  // naturally follows the last user message's language (verified RO→EN
-  // in scripts/replay-lang.mjs).
+  // For chitchat turns, system = persona only. Anything more — even a
+  // single "always reply in the user's language" line — primes the
+  // model into a flatter, policy-document tone (verified empirically
+  // in scripts/replay-gigi.mjs in swirlock-idp-base).
+  //
+  // For turns where the orchestrator ran a SEARCH (or any other
+  // fulfilling command), persona + SOURCE_GROUNDING_RULE. The model is
+  // already in fact-summarising mode for those turns, so the extra
+  // discipline doesn't cost personality.
+  const systemParts: string[] = [];
+  if (args.personaSystemPrompt) systemParts.push(args.personaSystemPrompt);
+  if (args.fulfilledContext) systemParts.push(SOURCE_GROUNDING_RULE);
   const messages: LlmMessage[] = [];
-  if (args.personaSystemPrompt) {
-    messages.push({ role: 'system', content: args.personaSystemPrompt });
+  if (systemParts.length > 0) {
+    messages.push({ role: 'system', content: systemParts.join('\n\n') });
   }
 
   for (const turn of args.history) {
