@@ -400,6 +400,18 @@ class PersistentModelHostSocket {
       return;
     }
 
+    console.log('===== LLM EVENT =====');
+    console.log('correlationId:', correlationId);
+    console.log('type:', evt.type);
+    if (evt.type === 'chunk' && evt.payload.text) {
+      console.log('text:', evt.payload.text);
+    } else if (evt.type === 'thinking' && evt.payload.text) {
+      console.log('thinking:', evt.payload.text);
+    } else if (evt.type === 'queued' || evt.type === 'done') {
+      console.log('payload:', JSON.stringify(evt.payload));
+    }
+    console.log('=====================');
+
     try {
       pending.onEvent?.(evt);
     } catch (error) {
