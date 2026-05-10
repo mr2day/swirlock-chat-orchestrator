@@ -74,17 +74,6 @@ const env = {
     callerService: 'chat-orchestrator',
     timeoutMs: 30000,
   },
-
-  // Experimental feature flags. See REFACTOR_PLAN.md and
-  // DECISION_PIPELINE.md.
-  experimental: {
-    // Phase F1 / F2 of the v5 refactor: when `true`, ConversationFlow
-    // runs the linear Decision Pipeline (one short utilitarian LLM
-    // call per branch + final answer) instead of the iterative agent
-    // control loop. Default is `false` while F1 is live; flipped to
-    // `true` in F2 once verified.
-    decisionPipeline: false,
-  },
 };
 
 module.exports = { env };

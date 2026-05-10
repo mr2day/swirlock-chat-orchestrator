@@ -2,8 +2,10 @@
 
 ## Status
 
-Proposal. Not yet implemented. Supersedes the agent loop landed in
-Phases A–E of `REFACTOR_PLAN.md`.
+Implemented. Supersedes the agent control loop. The orchestrator's
+`ConversationFlowService` runs the linear decision pipeline as its
+only path; the loop, the JSON-frame commands, and the
+ControlPromptBuilder are all gone.
 
 ## The story
 
@@ -446,35 +448,7 @@ The full iterative agent loop returns later, in its own pipeline
 (`AgentFlowService`), driving a different surface — see
 [VISION.md](VISION.md) for the sketch and the rationale.
 
-## Migration plan
-
-The change is large enough that I want to land it in two
-commits, not one mega-PR.
-
-**Phase F1 — build the decisions side, do not yet remove the loop.**
-
-- Add `src/chat/decisions/` (`decisions.service.ts`,
-  `decision-prompts.ts`, `signal-codec.ts`).
-- Add `DecisionsService` to `ChatModule` providers.
-- Wire a feature-flagged path in `ConversationFlowService`: if
-  `cfg.experimental.decisionPipeline === true`, run the new pipeline;
-  otherwise run the existing control loop. (Defaults to off.)
-- Build, lint, smoke test both paths against the live LLMs.
-
-**Phase F2 — flip the default and delete the loop.**
-
-- Default the flag to on, manually verify the same Romanian weather
-  question works.
-- Delete `control/`, `commands/`, `control-loop.service.ts`,
-  `control-prompt-builder.service.ts`, `control-frame-parser.ts`.
-- Delete the now-unused `summarizePriorAssistantTurn` machinery.
-- Drop the feature flag (the code path becomes the only path).
-- Update `REFACTOR_PLAN.md` with Phase F1/F2 marked shipped.
-
-This staging means at any point during the work the orchestrator runs
-end-to-end. There is no half-live state.
-
-## Open questions worth deciding before F1 starts
+## Open notes
 
 1. **Should `DecisionsService` use `LlmHostService.streamInfer` or a
    simpler non-streaming variant?** The streaming layer has a tiny
@@ -504,4 +478,4 @@ parsing one short answer wrapped in `⟦…⟧`. The orchestrator owns the
 flow; the model owns the answer. It is faster, more reliable, and
 removes ten files of agent-loop scaffolding.
 
-Awaiting approval to start Phase F1.
+Shipped.

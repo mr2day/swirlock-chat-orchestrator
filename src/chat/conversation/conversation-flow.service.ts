@@ -26,8 +26,6 @@ import {
   extractImageParts,
   extractUserText,
 } from '../chat-session.service';
-import type { AgentActivityEvent } from '../commands/agent-command.types';
-import { ControlLoopService } from '../control/control-loop.service';
 import { DecisionsService } from '../decisions/decisions.service';
 import type { PhaseEventEmitter } from '../decisions/decisions.service';
 import { GeocodingService } from '../location/geocoding.service';
@@ -54,15 +52,10 @@ export interface TurnDoneEnvelope {
     sourceUrl?: string;
   }>;
   diagnostics?: {
-    pipeline: 'control-loop' | 'decision-pipeline';
     retrievalUsed: boolean;
     retrievalMode: string;
     personaId: string;
     identityVersion: number;
-    /** Populated only by the legacy control-loop pipeline. */
-    agentSteps?: number;
-    toolCommands?: number;
-    commands?: string[];
   };
 }
 
@@ -73,25 +66,11 @@ export interface RunTurnInput {
   dto: SubmitTurnDto;
   abortSignal: AbortSignal;
   onAccepted: () => void;
-  onClassifying: (info: { step: number }) => void;
   onRetrievalEvent: (event: RetrievalStreamEvent) => void;
-  onAgentActivity: (event: AgentActivityEvent) => void;
   onModelEvent: (event: LlmStreamEvent) => void;
   onFinalChunk: (text: string) => void;
-  /** Per-phase streaming events for the new Decision Pipeline. */
   onPhaseEvent?: PhaseEventEmitter;
   resolveUserLocation: () => Promise<UserLocation | null>;
-}
-
-interface AgentResult {
-  assistantText: string;
-  finishReason: 'stop' | 'length' | 'error';
-  citations: Array<{
-    evidenceId: string;
-    sourceTitle: string;
-    sourceUrl?: string;
-  }>;
-  diagnostics: NonNullable<TurnDoneEnvelope['diagnostics']>;
 }
 
 interface PreparedTurnContext {
@@ -108,17 +87,18 @@ interface PreparedTurnContext {
 }
 
 /**
- * Orchestrates one user turn end-to-end.
+ * Drives one user turn end-to-end through the linear decision
+ * pipeline (DECISION_PIPELINE.md):
  *
- * Branches on `cfg.experimental.decisionPipeline`:
- * - When `false` (default while Phase F1 is landing): runs the
- *   legacy iterative agent control loop via `ControlLoopService`.
- * - When `true`: runs the linear Decision Pipeline (per
- *   `DECISION_PIPELINE.md`) — `needsSearch` → optional location
- *   resolution → `generateSearchQuery` → RAG → final-answer
- *   streaming. Each utilitarian step streams its tokens to the UI
- *   via `turn.phase.*` events, and records a `decision.*.completed`
- *   row in `decision_events`.
+ *   needsSearch?
+ *     -> if yes: needsLocation?
+ *       -> if yes and no initial location: ask UI + reverse-geocode
+ *     -> generateSearchQuery (city baked in if known)
+ *     -> rag.retrieve
+ *   final-answer streaming
+ *
+ * Each utilitarian step streams its tokens to the UI via
+ * `turn.phase.*` events and writes a `decision_events` row.
  */
 @Injectable()
 export class ConversationFlowService {
@@ -127,7 +107,6 @@ export class ConversationFlowService {
     private readonly sessions: ChatSessionService,
     private readonly history: ConversationHistoryService,
     private readonly persona: PersonaIdentityService,
-    private readonly controlLoop: ControlLoopService,
     private readonly fragmenter: FragmenterClientService,
     private readonly geocoding: GeocodingService,
     private readonly decisions: DecisionsService,
@@ -140,14 +119,203 @@ export class ConversationFlowService {
 
   async runTurn(input: RunTurnInput): Promise<TurnDoneEnvelope> {
     const ctx = await this.prepareTurnContext(input);
+    const onPhase = input.onPhaseEvent;
 
-    let agentResult: AgentResult;
+    this.recordTrace(ctx, 'pipeline.started', {
+      summary: 'Decision pipeline took control of the turn flow.',
+    });
+
+    let assistantText: string;
+    let finishReason: 'stop' | 'length' | 'error';
+    let ragContext: RagContext | undefined;
+
     try {
-      if (this.cfg.experimental?.decisionPipeline === true) {
-        agentResult = await this.runDecisionPipeline(input, ctx);
-      } else {
-        agentResult = await this.runControlLoop(input, ctx);
+      const needsSearch = await this.decisions.needsSearch({
+        correlationId: ctx.correlationId,
+        abortSignal: input.abortSignal,
+        userText: ctx.userText,
+        onPhase,
+      });
+      this.recordTrace(ctx, 'decision.needsSearch.completed', {
+        summary: needsSearch ? 'Decided: search' : 'Decided: direct',
+        payload: { result: needsSearch ? 'search' : 'direct' },
+      });
+
+      let location = ctx.initialLocation;
+
+      if (needsSearch) {
+        if (!location) {
+          const needsLocation = await this.decisions.needsLocation({
+            correlationId: ctx.correlationId,
+            abortSignal: input.abortSignal,
+            userText: ctx.userText,
+            onPhase,
+          });
+          this.recordTrace(ctx, 'decision.needsLocation.completed', {
+            summary: needsLocation
+              ? 'Decided: location needed'
+              : 'Decided: location not needed',
+            payload: { result: needsLocation ? 'needed' : 'skip' },
+          });
+
+          if (needsLocation) {
+            onPhase?.({
+              type: 'started',
+              phase: 'location.resolve',
+              label: 'Resolving location',
+            });
+            const raw = await input.resolveUserLocation();
+            if (raw) {
+              location = await this.enrichLocation(raw);
+              const label = location.cityName
+                ? `Located: ${location.cityName}${location.countryName ? `, ${location.countryName}` : ''}`
+                : `Located: lat ${location.latitude}, lng ${location.longitude}`;
+              onPhase?.({
+                type: 'completed',
+                phase: 'location.resolve',
+                label,
+                result: location,
+              });
+              this.recordTrace(ctx, 'location.resolve.completed', {
+                summary: label,
+                payload: { location },
+              });
+            } else {
+              onPhase?.({
+                type: 'completed',
+                phase: 'location.resolve',
+                label: 'Location not provided',
+                result: null,
+              });
+              this.recordTrace(ctx, 'location.resolve.completed', {
+                summary: 'User did not provide a location.',
+                payload: { available: false },
+              });
+            }
+          }
+        }
+
+        const query = await this.decisions.generateSearchQuery({
+          correlationId: ctx.correlationId,
+          abortSignal: input.abortSignal,
+          userText: ctx.userText,
+          ...(location
+            ? {
+                location: {
+                  ...(location.cityName ? { cityName: location.cityName } : {}),
+                  ...(location.countryName
+                    ? { countryName: location.countryName }
+                    : {}),
+                },
+              }
+            : {}),
+          onPhase,
+        });
+        this.recordTrace(ctx, 'decision.generateSearchQuery.completed', {
+          summary: `Search query: ${query}`,
+          payload: { query },
+        });
+
+        onPhase?.({
+          type: 'started',
+          phase: 'rag.retrieve',
+          label: `Searching: "${query}"`,
+        });
+        try {
+          ragContext = await this.rag.retrieve({
+            correlationId: ctx.correlationId,
+            sessionId: ctx.sessionId,
+            userText: ctx.userText,
+            parts: [{ type: 'text', text: query }],
+            resolvedQueryText: query,
+            freshness: this.cfg.rag.freshness,
+            allowedModes: [...this.cfg.rag.allowedModes],
+            ...(location ? { userLocation: location } : {}),
+            onStreamEvent: input.onRetrievalEvent,
+            abortSignal: input.abortSignal,
+          });
+          onPhase?.({
+            type: 'completed',
+            phase: 'rag.retrieve',
+            label: `${ragContext.evidence.length} source${ragContext.evidence.length === 1 ? '' : 's'}`,
+            result: {
+              retrievalMode: ragContext.retrievalMode,
+              evidenceCount: ragContext.evidence.length,
+            },
+          });
+          this.recordTrace(ctx, 'rag.retrieve.completed', {
+            summary: `Retrieved ${ragContext.evidence.length} evidence chunk(s).`,
+            payload: {
+              query,
+              retrievalMode: ragContext.retrievalMode,
+              evidenceCount: ragContext.evidence.length,
+            },
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          onPhase?.({ type: 'failed', phase: 'rag.retrieve', message });
+          this.recordTrace(ctx, 'rag.retrieve.failed', {
+            summary: message,
+            payload: { query },
+          });
+          ragContext = undefined;
+        }
       }
+
+      onPhase?.({
+        type: 'started',
+        phase: 'final.streaming',
+        label: 'Drafting answer',
+      });
+      this.recordTrace(ctx, 'final.streaming.started', {
+        summary: 'Streaming final answer.',
+      });
+
+      const messages = this.conversationPromptBuilder.buildMessages({
+        identity: ctx.identity,
+        history: ctx.view.messages,
+        consolidation: ctx.view.consolidation,
+        userText: ctx.userText,
+        occurredAt: ctx.occurredAt,
+        ragContexts: ragContext ? [ragContext] : [],
+      });
+
+      const finalCap = this.capping.forFinalAnswer({ messages });
+      const ollama: Record<string, unknown> = {};
+      if (finalCap !== undefined) ollama.num_predict = finalCap;
+
+      const finalResult = await this.llm.streamInfer({
+        correlationId: ctx.correlationId,
+        messages,
+        ...(ctx.llmParts.length > 0 ? { parts: ctx.llmParts } : {}),
+        options: {
+          responseFormat: 'text',
+          thinking: ctx.thinking,
+          ...(Object.keys(ollama).length > 0 ? { ollama } : {}),
+        },
+        abortSignal: input.abortSignal,
+        onEvent: (evt) => {
+          if (evt.type === 'chunk') {
+            input.onFinalChunk(evt.payload.text);
+            return;
+          }
+          input.onModelEvent(evt);
+        },
+      });
+
+      assistantText = finalResult.text;
+      finishReason = finalResult.finishReason;
+
+      onPhase?.({
+        type: 'completed',
+        phase: 'final.streaming',
+        label: 'Answer streamed',
+        result: { finishReason },
+      });
+      this.recordTrace(ctx, 'final.streaming.completed', {
+        summary: `Streaming final answer completed with finishReason=${finishReason}.`,
+        payload: { finishReason, textLength: assistantText.length },
+      });
     } catch (err) {
       if (err instanceof HttpException) throw err;
       throw new ServiceUnavailableException(
@@ -155,7 +323,7 @@ export class ConversationFlowService {
       );
     }
 
-    if (agentResult.assistantText.length === 0) {
+    if (assistantText.length === 0) {
       throw new ServiceUnavailableException(
         'Pipeline completed without producing final answer text',
       );
@@ -167,7 +335,7 @@ export class ConversationFlowService {
       parts: input.dto.message.parts,
       userText: ctx.userText,
       occurredAt: ctx.occurredAt,
-      assistantText: agentResult.assistantText,
+      assistantText,
     });
 
     this.fragmenter.notifyObserved({
@@ -184,15 +352,16 @@ export class ConversationFlowService {
       turnId: persisted.turnId,
       assistantMessage: {
         messageId: persisted.assistantMessageId,
-        content: agentResult.assistantText,
+        content: assistantText,
         createdAt: persisted.createdAt,
       },
-      finishReason: agentResult.finishReason,
-      citations: agentResult.citations,
+      finishReason,
+      citations: this.citationsFrom(ragContext),
       ...(includeDiagnostics
         ? {
             diagnostics: {
-              ...agentResult.diagnostics,
+              retrievalUsed: ragContext?.retrievalUsed ?? false,
+              retrievalMode: ragContext?.retrievalMode ?? 'none',
               personaId: ctx.identity.personaId,
               identityVersion: ctx.identity.identityVersion,
             },
@@ -253,278 +422,6 @@ export class ConversationFlowService {
       occurredAt: input.dto.message.occurredAt,
     };
   }
-
-  // ----- legacy control loop branch -----
-
-  private async runControlLoop(
-    input: RunTurnInput,
-    ctx: PreparedTurnContext,
-  ): Promise<AgentResult> {
-    const result = await this.controlLoop.run({
-      sessionId: ctx.sessionId,
-      turnId: ctx.turnId,
-      correlationId: ctx.correlationId,
-      identity: ctx.identity,
-      userText: ctx.userText,
-      history: ctx.view.messages,
-      consolidation: ctx.view.consolidation,
-      ...(ctx.llmParts.length > 0 ? { llmParts: ctx.llmParts } : {}),
-      occurredAt: ctx.occurredAt,
-      ...(ctx.initialLocation
-        ? { initialUserLocation: ctx.initialLocation }
-        : {}),
-      initialThinking: ctx.thinking,
-      abortSignal: input.abortSignal,
-      resolveUserLocation: async () => {
-        const raw = await input.resolveUserLocation();
-        return raw ? this.enrichLocation(raw) : null;
-      },
-      onClassifying: input.onClassifying,
-      onAgentActivity: input.onAgentActivity,
-      onRagStreamEvent: input.onRetrievalEvent,
-      onModelEvent: input.onModelEvent,
-      onFinalChunk: input.onFinalChunk,
-    });
-
-    return {
-      assistantText: result.assistantText,
-      finishReason: result.finishReason,
-      citations: result.citations,
-      diagnostics: {
-        pipeline: 'control-loop',
-        retrievalUsed: result.diagnostics.retrievalUsed,
-        retrievalMode: result.diagnostics.retrievalMode,
-        personaId: ctx.identity.personaId,
-        identityVersion: ctx.identity.identityVersion,
-        agentSteps: result.diagnostics.agentSteps,
-        toolCommands: result.diagnostics.toolCommands,
-        commands: result.diagnostics.commands,
-      },
-    };
-  }
-
-  // ----- new decision pipeline branch -----
-
-  private async runDecisionPipeline(
-    input: RunTurnInput,
-    ctx: PreparedTurnContext,
-  ): Promise<AgentResult> {
-    const onPhase = input.onPhaseEvent;
-
-    this.recordTrace(ctx, 'decision_pipeline.started', {
-      summary: 'Decision pipeline took control of the turn flow.',
-    });
-
-    const needsSearch = await this.decisions.needsSearch({
-      correlationId: ctx.correlationId,
-      abortSignal: input.abortSignal,
-      userText: ctx.userText,
-      onPhase,
-    });
-    this.recordTrace(ctx, 'decision.needsSearch.completed', {
-      summary: needsSearch ? 'Decided: search' : 'Decided: direct',
-      payload: { result: needsSearch ? 'search' : 'direct' },
-    });
-
-    let location = ctx.initialLocation;
-    let ragContext: RagContext | undefined;
-
-    if (needsSearch) {
-      if (!location) {
-        const needsLocation = await this.decisions.needsLocation({
-          correlationId: ctx.correlationId,
-          abortSignal: input.abortSignal,
-          userText: ctx.userText,
-          onPhase,
-        });
-        this.recordTrace(ctx, 'decision.needsLocation.completed', {
-          summary: needsLocation
-            ? 'Decided: location needed'
-            : 'Decided: location not needed',
-          payload: { result: needsLocation ? 'needed' : 'skip' },
-        });
-
-        if (needsLocation) {
-          onPhase?.({
-            type: 'started',
-            phase: 'location.resolve',
-            label: 'Resolving location',
-          });
-          const raw = await input.resolveUserLocation();
-          if (raw) {
-            location = await this.enrichLocation(raw);
-            const label = location.cityName
-              ? `Located: ${location.cityName}${location.countryName ? `, ${location.countryName}` : ''}`
-              : `Located: lat ${location.latitude}, lng ${location.longitude}`;
-            onPhase?.({
-              type: 'completed',
-              phase: 'location.resolve',
-              label,
-              result: location,
-            });
-            this.recordTrace(ctx, 'location.resolve.completed', {
-              summary: label,
-              payload: { location },
-            });
-          } else {
-            onPhase?.({
-              type: 'completed',
-              phase: 'location.resolve',
-              label: 'Location not provided',
-              result: null,
-            });
-            this.recordTrace(ctx, 'location.resolve.completed', {
-              summary: 'User did not provide a location.',
-              payload: { available: false },
-            });
-          }
-        }
-      }
-
-      const query = await this.decisions.generateSearchQuery({
-        correlationId: ctx.correlationId,
-        abortSignal: input.abortSignal,
-        userText: ctx.userText,
-        ...(location
-          ? {
-              location: {
-                ...(location.cityName ? { cityName: location.cityName } : {}),
-                ...(location.countryName
-                  ? { countryName: location.countryName }
-                  : {}),
-              },
-            }
-          : {}),
-        onPhase,
-      });
-      this.recordTrace(ctx, 'decision.generateSearchQuery.completed', {
-        summary: `Search query: ${query}`,
-        payload: { query },
-      });
-
-      onPhase?.({
-        type: 'started',
-        phase: 'rag.retrieve',
-        label: `Searching: "${query}"`,
-      });
-      try {
-        ragContext = await this.rag.retrieve({
-          correlationId: ctx.correlationId,
-          sessionId: ctx.sessionId,
-          userText: ctx.userText,
-          parts: [{ type: 'text', text: query }],
-          resolvedQueryText: query,
-          freshness: this.cfg.rag.freshness,
-          allowedModes: [...this.cfg.rag.allowedModes],
-          ...(location ? { userLocation: location } : {}),
-          onStreamEvent: input.onRetrievalEvent,
-          abortSignal: input.abortSignal,
-        });
-        onPhase?.({
-          type: 'completed',
-          phase: 'rag.retrieve',
-          label: `${ragContext.evidence.length} source${ragContext.evidence.length === 1 ? '' : 's'}`,
-          result: {
-            retrievalMode: ragContext.retrievalMode,
-            evidenceCount: ragContext.evidence.length,
-          },
-        });
-        this.recordTrace(ctx, 'rag.retrieve.completed', {
-          summary: `Retrieved ${ragContext.evidence.length} evidence chunk(s).`,
-          payload: {
-            query,
-            retrievalMode: ragContext.retrievalMode,
-            evidenceCount: ragContext.evidence.length,
-          },
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        onPhase?.({
-          type: 'failed',
-          phase: 'rag.retrieve',
-          message,
-        });
-        this.recordTrace(ctx, 'rag.retrieve.failed', {
-          summary: message,
-          payload: { query },
-        });
-        ragContext = undefined;
-      }
-    }
-
-    onPhase?.({
-      type: 'started',
-      phase: 'final.streaming',
-      label: 'Drafting answer',
-    });
-    this.recordTrace(ctx, 'final.streaming.started', {
-      summary: 'Streaming final answer.',
-    });
-
-    const messages = this.conversationPromptBuilder.buildMessages({
-      identity: ctx.identity,
-      history: ctx.view.messages,
-      consolidation: ctx.view.consolidation,
-      userText: ctx.userText,
-      occurredAt: ctx.occurredAt,
-      observations: [],
-      ragContexts: ragContext ? [ragContext] : [],
-      activePlanSummary: null,
-      activitySummary: null,
-    });
-
-    const finalCap = this.capping.forFinalAnswer({ messages });
-    const ollama: Record<string, unknown> = {};
-    if (finalCap !== undefined) ollama.num_predict = finalCap;
-
-    const finalResult = await this.llm.streamInfer({
-      correlationId: ctx.correlationId,
-      messages,
-      ...(ctx.llmParts.length > 0 ? { parts: ctx.llmParts } : {}),
-      options: {
-        responseFormat: 'text',
-        thinking: ctx.thinking,
-        ...(Object.keys(ollama).length > 0 ? { ollama } : {}),
-      },
-      abortSignal: input.abortSignal,
-      onEvent: (evt) => {
-        if (evt.type === 'chunk') {
-          input.onFinalChunk(evt.payload.text);
-          return;
-        }
-        input.onModelEvent(evt);
-      },
-    });
-
-    onPhase?.({
-      type: 'completed',
-      phase: 'final.streaming',
-      label: 'Answer streamed',
-      result: { finishReason: finalResult.finishReason },
-    });
-    this.recordTrace(ctx, 'final.streaming.completed', {
-      summary: `Streaming final answer completed with finishReason=${finalResult.finishReason}.`,
-      payload: {
-        finishReason: finalResult.finishReason,
-        textLength: finalResult.text.length,
-      },
-    });
-
-    return {
-      assistantText: finalResult.text,
-      finishReason: finalResult.finishReason,
-      citations: this.citationsFrom(ragContext),
-      diagnostics: {
-        pipeline: 'decision-pipeline',
-        retrievalUsed: ragContext?.retrievalUsed ?? false,
-        retrievalMode: ragContext?.retrievalMode ?? 'none',
-        personaId: ctx.identity.personaId,
-        identityVersion: ctx.identity.identityVersion,
-      },
-    };
-  }
-
-  // ----- shared helpers -----
 
   private recordTrace(
     ctx: PreparedTurnContext,
@@ -588,13 +485,6 @@ export class ConversationFlowService {
     };
   }
 
-  /**
-   * Enriches a UserLocation with city/region/country derived from
-   * reverse geocoding. The Vanamonde model can't infer these from raw
-   * coordinates reliably, so we resolve them once before the location
-   * is fed into prompts or used to construct rag.retrieve queries. If
-   * geocoding fails, returns the input unchanged.
-   */
   private async enrichLocation(loc: UserLocation): Promise<UserLocation> {
     const geo = await this.geocoding.reverseGeocode({
       latitude: loc.latitude,

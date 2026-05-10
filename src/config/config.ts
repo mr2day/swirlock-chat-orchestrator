@@ -26,17 +26,6 @@ export interface RagConfig {
   maxEvidenceChunks: number;
 }
 
-export interface ExperimentalConfig {
-  /**
-   * When `true`, the orchestrator runs the linear Decision Pipeline
-   * (DecisionsService + DECISION_PIPELINE.md) for live turns instead
-   * of the agent control loop. Defaults to `false` while Phase F1 is
-   * landed; flipped to `true` in Phase F2 once the pipeline has been
-   * verified live and the loop is ready to be deleted.
-   */
-  decisionPipeline?: boolean;
-}
-
 export interface FragmenterConfig {
   /**
    * When false, the orchestrator skips opening a socket to the
@@ -59,7 +48,6 @@ export interface ServiceConfig {
   llmHost: LlmHostConfig;
   rag: RagConfig;
   fragmenter: FragmenterConfig;
-  experimental?: ExperimentalConfig;
 }
 
 export const SERVICE_CONFIG = Symbol('SERVICE_CONFIG');
@@ -123,12 +111,4 @@ function validate(c: ServiceConfig): void {
       (typeof frag.bearerToken === 'string' && frag.bearerToken.length > 0),
     'fragmenter.bearerToken required when enabled',
   );
-
-  if (c.experimental !== undefined) {
-    must(
-      c.experimental.decisionPipeline === undefined ||
-        typeof c.experimental.decisionPipeline === 'boolean',
-      'experimental.decisionPipeline must be a boolean',
-    );
-  }
 }

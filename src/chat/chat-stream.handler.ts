@@ -290,20 +290,8 @@ export class ChatStreamHandler {
         correlationId,
         dto,
         abortSignal: abort.signal,
-        onAccepted: () => {
-          send('turn.accepted');
-          send('turn.classifying');
-        },
-        onClassifying: (info) => send('turn.classifying', { step: info.step }),
+        onAccepted: () => send('turn.accepted'),
         onRetrievalEvent: (event) => send('turn.retrieval', { event }),
-        onAgentActivity: (event) => {
-          send('turn.agent', {
-            phase: event.phase,
-            ...(event.command ? { command: event.command } : {}),
-            summary: event.summary,
-            ...(event.data !== undefined ? { data: event.data } : {}),
-          });
-        },
         onModelEvent: (evt) => {
           switch (evt.type) {
             case 'queued':

@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { LlmMessage } from '../../llm-host/llm-host.service';
 import type { RagContext } from '../../rag/rag.service';
-import type { AgentObservation } from '../commands/agent-command.types';
 import type {
   ConversationConsolidation,
   ConversationMessage,
@@ -14,10 +13,7 @@ export interface BuildConversationPromptInput {
   consolidation: ConversationConsolidation;
   userText: string;
   occurredAt: string;
-  observations: AgentObservation[];
   ragContexts: RagContext[];
-  activePlanSummary: string | null;
-  activitySummary: string | null;
 }
 
 const RECENT_HISTORY_LIMIT = 12;
@@ -98,27 +94,6 @@ export class ConversationPromptBuilderService {
       'Never tell the user you cannot search, cannot access the internet, or do not have access to current/future data — the orchestrator already searched on your behalf when relevant; if the search returned nothing, say what is missing or ask a clarifying question (e.g. ask the user for their city for weather queries) instead of refusing.',
       `Current client timestamp: ${input.occurredAt}`,
     ];
-
-    if (input.activitySummary) {
-      lines.push(
-        '',
-        'Recent agent activity for this session:',
-        input.activitySummary,
-      );
-    }
-
-    if (input.activePlanSummary) {
-      lines.push('', input.activePlanSummary);
-    }
-
-    if (input.observations.length > 0) {
-      lines.push('', 'Observations from commands run in this turn:');
-      input.observations.forEach((observation, index) => {
-        lines.push(
-          `${index + 1}. [${observation.kind}] ${observation.summary}`,
-        );
-      });
-    }
 
     const evidence = input.ragContexts.flatMap((context) => context.evidence);
     if (evidence.length > 0) {
