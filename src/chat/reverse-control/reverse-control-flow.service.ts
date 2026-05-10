@@ -16,6 +16,7 @@ import type {
 } from '../../llm-host/llm-host.service';
 import { LlmHostService } from '../../llm-host/llm-host.service';
 import type {
+  RagEvidence,
   RetrievalStreamEvent,
   UserLocation,
 } from '../../rag/rag.service';
@@ -152,6 +153,7 @@ export class ReverseControlFlowService {
     });
 
     const fulfilled: FulfilledLine[] = [];
+    const evidenceById = new Map<string, RagEvidence>();
     let thinkingForAnswer = false;
     let parsed: ParsedCommands;
 
@@ -244,6 +246,13 @@ export class ReverseControlFlowService {
         }
         if (result.value) {
           fulfilled.push({ command: step.label, value: result.value });
+        }
+        if (result.evidence) {
+          for (const ev of result.evidence) {
+            if (!evidenceById.has(ev.evidenceId)) {
+              evidenceById.set(ev.evidenceId, ev);
+            }
+          }
         }
         onPhase?.({
           type: 'completed',
@@ -340,6 +349,12 @@ export class ReverseControlFlowService {
 
       const includeDiagnostics = input.dto.options?.includeDiagnostics === true;
 
+      const citations = [...evidenceById.values()].map((ev) => ({
+        evidenceId: ev.evidenceId,
+        sourceTitle: ev.sourceTitle,
+        ...(ev.sourceUrl ? { sourceUrl: ev.sourceUrl } : {}),
+      }));
+
       return {
         sessionId: ctx.sessionId,
         turnId: persisted.turnId,
@@ -349,7 +364,7 @@ export class ReverseControlFlowService {
           createdAt: persisted.createdAt,
         },
         finishReason: finalResult.finishReason,
-        citations: [],
+        citations,
         ...(includeDiagnostics
           ? {
               diagnostics: {

@@ -2,7 +2,11 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { SERVICE_CONFIG } from '../../config/config';
 import type { ServiceConfig } from '../../config/config';
 import { RagService } from '../../rag/rag.service';
-import type { RetrievalStreamEvent, UserLocation } from '../../rag/rag.service';
+import type {
+  RagEvidence,
+  RetrievalStreamEvent,
+  UserLocation,
+} from '../../rag/rag.service';
 import type { CommandKind, ParsedCommands } from './command-parser';
 
 export interface FulfillContext {
@@ -20,6 +24,8 @@ export interface FulfillmentResult {
   command: CommandKind;
   value: string;
   patch?: { location?: UserLocation };
+  /** Evidence pulled by RAG (if any), to be propagated as citations. */
+  evidence?: RagEvidence[];
 }
 
 /**
@@ -94,6 +100,7 @@ export class CommandFulfillerService {
         return {
           command: label,
           value: `Search query "${query}" returned no results.`,
+          evidence: [],
         };
       }
 
@@ -105,7 +112,11 @@ export class CommandFulfillerService {
         const snippet = ev.snippet ? `: ${ev.snippet}` : '';
         lines.push(`- ${ev.sourceTitle}${url}${snippet}`);
       }
-      return { command: label, value: lines.join('\n') };
+      return {
+        command: label,
+        value: lines.join('\n'),
+        evidence: result.evidence,
+      };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.log.warn(`${label} search fulfillment failed: ${message}`);
