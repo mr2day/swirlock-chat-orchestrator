@@ -4,7 +4,7 @@ import type { ServiceConfig } from '../../config/config';
 import { RagService } from '../../rag/rag.service';
 import type { RetrievalStreamEvent, UserLocation } from '../../rag/rag.service';
 import { GeocodingService } from '../location/geocoding.service';
-import type { ParsedNeed } from './need-parser';
+import type { CommandKind, ParsedCommands } from './command-parser';
 
 export interface FulfillContext {
   correlationId: string;
@@ -12,43 +12,33 @@ export interface FulfillContext {
   userText: string;
   occurredAt: string;
   abortSignal: AbortSignal;
-  /** The location attached at turn.submit time, already enriched. */
   initialLocation: UserLocation | undefined;
-  /**
-   * Asks the chat client for live geolocation (turn.location_required
-   * → turn.location_response). Null if user denies / times out.
-   */
   resolveUserLocation: () => Promise<UserLocation | null>;
   onRetrievalStreamEvent: (event: RetrievalStreamEvent) => void;
 }
 
 export interface FulfillmentResult {
-  /** The need that was fulfilled (kind + optional arg). */
-  need: ParsedNeed;
-  /** Short value the orchestrator injects back into the next prompt. */
+  command: CommandKind;
   value: string;
-  /**
-   * Side-effects this fulfillment leaves on the turn context, if any.
-   * E.g., resolving location updates the turn's known location so a
-   * subsequent `need="search"` can include the city in the query
-   * automatically (the LLM still controls the query, but the
-   * fulfilled location is visible to it).
-   */
   patch?: { location?: UserLocation };
 }
 
 /**
- * Dispatches a parsed need to its handler.
+ * Dispatches each parsed command to its handler.
  *
- * Handlers are deliberately small: pull from already-known turn
- * context (date, location), or call out to RAG / Geocoding for the
- * data the orchestrator does have to fetch. Each handler returns a
- * short string the assessment loop will inject back into the next
- * prompt as fulfilled context.
+ * Commands fall into three groups:
+ *
+ *   - Pure flags handled by the flow service (THINKING, DIRECT) — not
+ *     fulfilled here.
+ *   - Already-pre-injected values (LOCATION, DATE_TIME) — re-stated
+ *     here for completeness when the LLM asks for them anyway, or
+ *     fetched live if not yet known.
+ *   - Real I/O commands (SEARCH) — calls RagService with the LLM's
+ *     `search_prompt`.
  */
 @Injectable()
-export class NeedFulfillerService {
-  private readonly log = new Logger(NeedFulfillerService.name);
+export class CommandFulfillerService {
+  private readonly log = new Logger(CommandFulfillerService.name);
 
   constructor(
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
@@ -57,59 +47,41 @@ export class NeedFulfillerService {
   ) {}
 
   async fulfill(
-    need: ParsedNeed,
+    command: CommandKind,
+    parsed: ParsedCommands,
     ctx: FulfillContext,
     knownLocation: UserLocation | undefined,
   ): Promise<FulfillmentResult> {
-    switch (need.kind) {
-      case 'date':
-        return { need, value: this.formatDate(ctx.occurredAt) };
+    switch (command) {
+      case 'DATE_TIME':
+        return { command, value: this.formatDateTime(ctx.occurredAt) };
 
-      case 'time':
-        return { need, value: this.formatTime(ctx.occurredAt) };
-
-      case 'timezone':
-        return { need, value: this.formatTimezone() };
-
-      case 'location':
+      case 'LOCATION':
         return this.fulfillLocation(ctx, knownLocation);
 
-      case 'search':
-        return this.fulfillSearch(need, ctx, knownLocation);
+      case 'SEARCH':
+        return this.fulfillSearch(parsed.searchPrompt, ctx, knownLocation);
 
-      default:
-        return {
-          need,
-          value: `(unknown need "${need.kind}" — orchestrator has no handler for this)`,
-        };
+      case 'THINKING':
+      case 'DIRECT':
+        // Handled in the flow service as flags, not as fulfilled values.
+        return { command, value: '' };
     }
   }
 
-  private formatDate(occurredAt: string): string {
+  private formatDateTime(occurredAt: string): string {
     const d = new Date(occurredAt);
     if (Number.isNaN(d.getTime())) return occurredAt;
-    return d.toLocaleDateString('en-GB', {
+    const date = d.toLocaleDateString('en-GB', {
       day: 'numeric',
       month: 'long',
       year: 'numeric',
     });
-  }
-
-  private formatTime(occurredAt: string): string {
-    const d = new Date(occurredAt);
-    if (Number.isNaN(d.getTime())) return occurredAt;
-    return d.toLocaleTimeString('en-GB', {
+    const time = d.toLocaleTimeString('en-GB', {
       hour: '2-digit',
       minute: '2-digit',
     });
-  }
-
-  private formatTimezone(): string {
-    try {
-      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown';
-    } catch {
-      return 'unknown';
-    }
+    return `${date}, ${time}`;
   }
 
   private async fulfillLocation(
@@ -117,18 +89,15 @@ export class NeedFulfillerService {
     knownLocation: UserLocation | undefined,
   ): Promise<FulfillmentResult> {
     if (knownLocation) {
-      return {
-        need: { kind: 'location' },
-        value: this.formatLocation(knownLocation),
-      };
+      return { command: 'LOCATION', value: this.formatLocation(knownLocation) };
     }
     const raw = await ctx.resolveUserLocation();
     if (!raw) {
-      return { need: { kind: 'location' }, value: 'unavailable' };
+      return { command: 'LOCATION', value: 'unavailable' };
     }
     const enriched = await this.enrichLocation(raw);
     return {
-      need: { kind: 'location' },
+      command: 'LOCATION',
       value: this.formatLocation(enriched),
       patch: { location: enriched },
     };
@@ -158,16 +127,15 @@ export class NeedFulfillerService {
   }
 
   private async fulfillSearch(
-    need: ParsedNeed,
+    searchPrompt: string | undefined,
     ctx: FulfillContext,
     knownLocation: UserLocation | undefined,
   ): Promise<FulfillmentResult> {
-    const query = need.arg?.value?.trim();
-    if (!query) {
-      return {
-        need,
-        value: '(search needed but no "query" argument was provided)',
-      };
+    const query = searchPrompt?.trim() || ctx.userText.trim();
+    if (!searchPrompt) {
+      this.log.warn(
+        'SEARCH command emitted without a [search_prompt="..."] tag; falling back to userText.',
+      );
     }
 
     try {
@@ -186,7 +154,7 @@ export class NeedFulfillerService {
 
       if (result.evidence.length === 0) {
         return {
-          need,
+          command: 'SEARCH',
           value: `Search query "${query}" returned no results.`,
         };
       }
@@ -199,12 +167,12 @@ export class NeedFulfillerService {
         const snippet = ev.snippet ? `: ${ev.snippet}` : '';
         lines.push(`- ${ev.sourceTitle}${url}${snippet}`);
       }
-      return { need, value: lines.join('\n') };
+      return { command: 'SEARCH', value: lines.join('\n') };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.log.warn(`search fulfillment failed: ${message}`);
+      this.log.warn(`SEARCH fulfillment failed: ${message}`);
       return {
-        need,
+        command: 'SEARCH',
         value: `Search for "${query}" failed: ${message}`,
       };
     }

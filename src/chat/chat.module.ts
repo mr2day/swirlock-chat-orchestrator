@@ -9,7 +9,7 @@ import { ChatStreamHandler } from './chat-stream.handler';
 import { ConversationHistoryService } from './conversation/conversation-history.service';
 import { LocationModule } from './location/location.module';
 import { PersonaIdentityService } from './persona/persona-identity.service';
-import { NeedFulfillerService } from './reverse-control/need-fulfiller.service';
+import { CommandFulfillerService } from './reverse-control/command-fulfiller.service';
 import { ReverseControlFlowService } from './reverse-control/reverse-control-flow.service';
 import { DecisionTraceService } from './trace/decision-trace.service';
 
@@ -25,9 +25,9 @@ import { DecisionTraceService } from './trace/decision-trace.service';
   providers: [
     ChatSessionService,
     ChatStreamHandler,
+    CommandFulfillerService,
     ConversationHistoryService,
     DecisionTraceService,
-    NeedFulfillerService,
     PersonaIdentityService,
     ReverseControlFlowService,
   ],

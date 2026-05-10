@@ -15,7 +15,10 @@ import type {
   LlmStreamEvent,
 } from '../../llm-host/llm-host.service';
 import { LlmHostService } from '../../llm-host/llm-host.service';
-import type { RetrievalStreamEvent, UserLocation } from '../../rag/rag.service';
+import type {
+  RetrievalStreamEvent,
+  UserLocation,
+} from '../../rag/rag.service';
 import { CappingService } from '../capping/capping.service';
 import {
   ChatSessionService,
@@ -29,15 +32,14 @@ import type { PersonaIdentityCapsule } from '../persona/persona-identity.service
 import { DecisionTraceService } from '../trace/decision-trace.service';
 import type { ConversationMessage } from '../conversation/conversation-history.service';
 import type { SubmitTurnDto } from '../dto/submit-turn.dto';
-import type { ParsedNeed } from './need-parser';
-import { parseReverseControl } from './need-parser';
-import { NeedFulfillerService } from './need-fulfiller.service';
+import type { CommandKind, ParsedCommands } from './command-parser';
+import { parseCommands } from './command-parser';
+import { CommandFulfillerService } from './command-fulfiller.service';
 import {
   buildAnswerPrompt,
   buildAssessmentPrompt,
 } from './reverse-control-prompts';
 
-const MAX_ASSESSMENT_ROUNDS = 5;
 const RECENT_HISTORY_LIMIT = 12;
 
 export type PhaseEvent =
@@ -63,8 +65,8 @@ export interface TurnDoneEnvelope {
     sourceUrl?: string;
   }>;
   diagnostics?: {
-    assessmentRounds: number;
-    needsFulfilled: string[];
+    commands: string[];
+    thinkingUsed: boolean;
     personaId: string;
     identityVersion: number;
   };
@@ -97,28 +99,28 @@ interface PreparedTurnContext {
 }
 
 interface FulfilledLine {
-  kind: string;
-  argSummary?: string;
+  command: CommandKind;
   value: string;
 }
 
 /**
- * Reverse-control flow.
+ * Reverse-control flow (Nick's commands format).
  *
- * Each turn runs as a small loop:
- *   1. Send the user message + the command table to the LLM and ask
- *      what it needs.
- *   2. The LLM emits `[need="..."]` markers (or `[done]`).
- *   3. The orchestrator fulfills each need (date, time, timezone,
- *      location, search, …) and accumulates the results.
- *   4. Repeat until the LLM emits `[done]` or the iteration cap is
- *      reached.
- *   5. Send a separate prompt asking the LLM to compose the final
- *      answer using the fulfilled context. That round streams to the
- *      user.
+ * Each turn runs in two rounds:
  *
- * The LLM declares its own needs; the orchestrator services them.
- * No pre-coded decision tree.
+ *   1. Assessment — orchestrator pre-injects the user's date+time and
+ *      city+country into a meta-section, then asks the LLM whether it
+ *      needs LOCATION / DATE_TIME / THINKING / SEARCH commands or can
+ *      answer DIRECT. The LLM responds with `[command="..."]` (and
+ *      `[search_prompt="..."]` if SEARCH).
+ *      Always uses thinking=false (utilitarian).
+ *
+ *   2. Answer — orchestrator fulfills any non-flag commands (SEARCH
+ *      via RAG; LOCATION/DATE_TIME re-stated for completeness) and
+ *      asks the LLM to compose the user-visible reply, with all
+ *      gathered context in the meta-section. Plain text streams to
+ *      the user. Uses thinking=true iff the LLM asked for THINKING in
+ *      round 1.
  */
 @Injectable()
 export class ReverseControlFlowService {
@@ -134,145 +136,148 @@ export class ReverseControlFlowService {
     private readonly llm: LlmHostService,
     private readonly trace: DecisionTraceService,
     private readonly capping: CappingService,
-    private readonly fulfiller: NeedFulfillerService,
+    private readonly fulfiller: CommandFulfillerService,
   ) {}
 
   async runTurn(input: RunTurnInput): Promise<TurnDoneEnvelope> {
     const ctx = await this.prepareTurnContext(input);
     const onPhase = input.onPhaseEvent;
 
+    let location = ctx.initialLocation;
+    const cityCountry = this.formatCityCountry(location);
+    const dateTime = this.formatDateTime(ctx.occurredAt);
+
     this.recordTrace(ctx, 'reverse_control.started', {
-      summary: 'Reverse-control flow took control of the turn.',
+      summary: `Reverse-control flow took control of the turn. Pre-injected city=${cityCountry ?? '(unknown)'}, dateTime=${dateTime}.`,
     });
 
-    let location = ctx.initialLocation;
     const fulfilled: FulfilledLine[] = [];
-    let assessmentRounds = 0;
+    let thinkingForAnswer = false;
+    let parsed: ParsedCommands;
 
     try {
-      // ------- assessment loop -------
-      for (let round = 1; round <= MAX_ASSESSMENT_ROUNDS; round++) {
-        assessmentRounds = round;
-        const phase = `assessment.round${round}`;
+      // ------- assessment round -------
+      const assessmentMessages = buildAssessmentPrompt({
+        userText: ctx.userText,
+        cityCountry,
+        dateTime,
+      });
 
-        const messages = buildAssessmentPrompt({
-          userText: ctx.userText,
-          fulfilledContext: this.renderFulfilledBlock(fulfilled),
-        });
+      onPhase?.({
+        type: 'started',
+        phase: 'assessment',
+        label: 'Classifying...',
+      });
 
+      const cap = this.capping.forUtilitarianDecision({
+        messages: assessmentMessages,
+      });
+      const ollama: Record<string, unknown> = { temperature: 0 };
+      if (cap !== undefined) ollama.num_predict = cap;
+
+      const assessment = await this.llm.streamInfer({
+        correlationId: ctx.correlationId,
+        messages: assessmentMessages,
+        options: { responseFormat: 'text', thinking: false, ollama },
+        abortSignal: input.abortSignal,
+        onEvent: (evt) => {
+          if (evt.type === 'chunk' && evt.payload.text) {
+            onPhase?.({
+              type: 'token',
+              phase: 'assessment',
+              text: evt.payload.text,
+            });
+          }
+        },
+      });
+
+      parsed = parseCommands(assessment.text);
+      thinkingForAnswer = parsed.commands.has('THINKING');
+
+      onPhase?.({
+        type: 'completed',
+        phase: 'assessment',
+        label: this.summariseParsed(parsed),
+        result: {
+          commands: [...parsed.commands],
+          ...(parsed.searchPrompt ? { searchPrompt: parsed.searchPrompt } : {}),
+        },
+      });
+      this.recordTrace(ctx, 'assessment.completed', {
+        summary: this.summariseParsed(parsed),
+        payload: {
+          commands: [...parsed.commands],
+          ...(parsed.searchPrompt ? { searchPrompt: parsed.searchPrompt } : {}),
+        },
+      });
+
+      // ------- fulfillment -------
+      // Order: LOCATION → DATE_TIME → SEARCH. THINKING and DIRECT are flags.
+      const order: CommandKind[] = ['LOCATION', 'DATE_TIME', 'SEARCH'];
+      for (const cmd of order) {
+        if (!parsed.commands.has(cmd)) continue;
+        const phaseId = `command.${cmd}`;
         onPhase?.({
           type: 'started',
-          phase,
-          label: `Assessment round ${round}`,
+          phase: phaseId,
+          label: this.startedLabelFor(cmd, parsed),
         });
-
-        const cap = this.capping.forUtilitarianDecision({ messages });
-        const ollama: Record<string, unknown> = { temperature: 0 };
-        if (cap !== undefined) ollama.num_predict = cap;
-
-        const result = await this.llm.streamInfer({
-          correlationId: ctx.correlationId,
-          messages,
-          options: { responseFormat: 'text', thinking: false, ollama },
-          abortSignal: input.abortSignal,
-          onEvent: (evt) => {
-            if (evt.type === 'chunk' && evt.payload.text) {
-              onPhase?.({ type: 'token', phase, text: evt.payload.text });
-            }
+        const result = await this.fulfiller.fulfill(
+          cmd,
+          parsed,
+          {
+            correlationId: ctx.correlationId,
+            sessionId: ctx.sessionId,
+            userText: ctx.userText,
+            occurredAt: ctx.occurredAt,
+            abortSignal: input.abortSignal,
+            initialLocation: location,
+            resolveUserLocation: input.resolveUserLocation,
+            onRetrievalStreamEvent: input.onRetrievalEvent,
           },
-        });
-
-        const parsed = parseReverseControl(result.text);
-
+          location,
+        );
+        if (result.patch?.location) {
+          location = result.patch.location;
+        }
+        if (result.value) {
+          fulfilled.push({ command: cmd, value: result.value });
+        }
         onPhase?.({
           type: 'completed',
-          phase,
-          label: parsed.done
-            ? 'Done — proceeding to answer'
-            : `${parsed.needs.length} need${parsed.needs.length === 1 ? '' : 's'} declared`,
-          result: parsed,
+          phase: phaseId,
+          label: this.completedLabelFor(cmd, result.value),
+          result: { value: result.value },
         });
-        this.recordTrace(ctx, `assessment.round${round}.completed`, {
-          summary: parsed.done
-            ? 'LLM emitted [done]'
-            : `LLM declared ${parsed.needs.length} need(s): ${parsed.needs.map((n) => n.kind).join(', ')}`,
-          payload: parsed,
+        this.recordTrace(ctx, `command.${cmd}.completed`, {
+          summary: this.completedLabelFor(cmd, result.value),
+          payload: { value: result.value },
         });
-
-        if (parsed.done) break;
-        if (parsed.needs.length === 0) {
-          this.log.warn(
-            `Assessment round ${round} produced no needs and no [done]; treating as done.`,
-          );
-          break;
-        }
-
-        for (const need of parsed.needs) {
-          const phaseId = `need.${need.kind}`;
-          onPhase?.({
-            type: 'started',
-            phase: phaseId,
-            label: this.startedLabelFor(need),
-          });
-          const result = await this.fulfiller.fulfill(
-            need,
-            {
-              correlationId: ctx.correlationId,
-              sessionId: ctx.sessionId,
-              userText: ctx.userText,
-              occurredAt: ctx.occurredAt,
-              abortSignal: input.abortSignal,
-              initialLocation: location,
-              resolveUserLocation: input.resolveUserLocation,
-              onRetrievalStreamEvent: input.onRetrievalEvent,
-            },
-            location,
-          );
-          if (result.patch?.location) {
-            location = result.patch.location;
-          }
-          fulfilled.push({
-            kind: need.kind,
-            ...(need.arg
-              ? { argSummary: `${need.arg.name}="${need.arg.value}"` }
-              : {}),
-            value: result.value,
-          });
-          onPhase?.({
-            type: 'completed',
-            phase: phaseId,
-            label: this.completedLabelFor(need, result.value),
-            result: { value: result.value },
-          });
-          this.recordTrace(ctx, `need.${need.kind}.completed`, {
-            summary: this.completedLabelFor(need, result.value),
-            payload: {
-              ...(need.arg ? { [need.arg.name]: need.arg.value } : {}),
-              value: result.value,
-            },
-          });
-        }
       }
 
       // ------- answer round -------
+      const finalCityCountry = this.formatCityCountry(location);
+
       onPhase?.({
         type: 'started',
         phase: 'answer.streaming',
-        label: 'Drafting answer',
+        label: thinkingForAnswer
+          ? 'Thinking and drafting answer'
+          : 'Drafting answer',
       });
       this.recordTrace(ctx, 'answer.streaming.started', {
-        summary: 'Streaming final answer.',
+        summary: `Streaming final answer (thinking=${thinkingForAnswer}).`,
       });
 
       const answerMessages = buildAnswerPrompt({
         userText: ctx.userText,
+        cityCountry: finalCityCountry,
+        dateTime,
         fulfilledContext: this.renderFulfilledBlock(fulfilled),
         recentHistoryBlock: this.renderHistoryBlock(ctx.history),
       });
 
-      const finalCap = this.capping.forFinalAnswer({
-        messages: answerMessages,
-      });
+      const finalCap = this.capping.forFinalAnswer({ messages: answerMessages });
       const finalOllama: Record<string, unknown> = {};
       if (finalCap !== undefined) finalOllama.num_predict = finalCap;
 
@@ -282,10 +287,8 @@ export class ReverseControlFlowService {
         ...(ctx.llmParts.length > 0 ? { parts: ctx.llmParts } : {}),
         options: {
           responseFormat: 'text',
-          thinking: false,
-          ...(Object.keys(finalOllama).length > 0
-            ? { ollama: finalOllama }
-            : {}),
+          thinking: thinkingForAnswer,
+          ...(Object.keys(finalOllama).length > 0 ? { ollama: finalOllama } : {}),
         },
         abortSignal: input.abortSignal,
         onEvent: (evt) => {
@@ -348,8 +351,8 @@ export class ReverseControlFlowService {
         ...(includeDiagnostics
           ? {
               diagnostics: {
-                assessmentRounds,
-                needsFulfilled: fulfilled.map((f) => f.kind),
+                commands: [...parsed.commands],
+                thinkingUsed: thinkingForAnswer,
                 personaId: ctx.identity.personaId,
                 identityVersion: ctx.identity.identityVersion,
               },
@@ -418,14 +421,33 @@ export class ReverseControlFlowService {
     };
   }
 
+  private formatCityCountry(loc: UserLocation | undefined): string | null {
+    if (!loc) return null;
+    if (loc.cityName && loc.countryName) {
+      return `${loc.cityName}, ${loc.countryName}`;
+    }
+    if (loc.cityName) return loc.cityName;
+    return null;
+  }
+
+  private formatDateTime(occurredAt: string): string {
+    const d = new Date(occurredAt);
+    if (Number.isNaN(d.getTime())) return occurredAt;
+    const date = d.toLocaleDateString('en-GB', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+    });
+    const time = d.toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    return `${date}, ${time}`;
+  }
+
   private renderFulfilledBlock(fulfilled: FulfilledLine[]): string | null {
     if (fulfilled.length === 0) return null;
-    const lines: string[] = [];
-    for (const f of fulfilled) {
-      const head = f.argSummary ? `${f.kind} (${f.argSummary})` : f.kind;
-      lines.push(`- ${head}: ${f.value}`);
-    }
-    return lines.join('\n');
+    return fulfilled.map((f) => `- ${f.command}: ${f.value}`).join('\n');
   }
 
   private renderHistoryBlock(history: ConversationMessage[]): string | null {
@@ -437,20 +459,32 @@ export class ReverseControlFlowService {
       .join('\n');
   }
 
-  private startedLabelFor(need: ParsedNeed): string {
-    if (need.kind === 'search' && need.arg?.value) {
-      return `Searching: "${need.arg.value}"`;
+  private summariseParsed(parsed: ParsedCommands): string {
+    if (parsed.commands.size === 0) {
+      return 'No command parsed; treating as DIRECT';
     }
-    if (need.kind === 'location') return 'Resolving location';
-    if (need.kind === 'date') return 'Looking up the date';
-    if (need.kind === 'time') return 'Looking up the time';
-    if (need.kind === 'timezone') return 'Looking up the timezone';
-    return `Fulfilling need: ${need.kind}`;
+    const list = [...parsed.commands].join(', ');
+    if (parsed.searchPrompt) {
+      return `Commands: ${list}; search_prompt="${parsed.searchPrompt}"`;
+    }
+    return `Commands: ${list}`;
   }
 
-  private completedLabelFor(need: ParsedNeed, value: string): string {
+  private startedLabelFor(cmd: CommandKind, parsed: ParsedCommands): string {
+    if (cmd === 'SEARCH') {
+      return parsed.searchPrompt
+        ? `Searching: "${parsed.searchPrompt}"`
+        : 'Searching';
+    }
+    if (cmd === 'LOCATION') return 'Resolving location';
+    if (cmd === 'DATE_TIME') return 'Looking up date and time';
+    return `Fulfilling ${cmd}`;
+  }
+
+  private completedLabelFor(cmd: CommandKind, value: string): string {
+    if (!value) return `${cmd} → (flag)`;
     const truncated = value.length > 80 ? `${value.slice(0, 77)}...` : value;
-    return `${need.kind} → ${truncated.replace(/\s+/g, ' ')}`;
+    return `${cmd} → ${truncated.replace(/\s+/g, ' ')}`;
   }
 
   private recordTrace(
