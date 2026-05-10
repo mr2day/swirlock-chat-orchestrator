@@ -20,15 +20,18 @@ const env = {
   host: '127.0.0.1',
   port: 3200,
 
-  // Single hardcoded dev user.
-  // Replace `bearerToken` with a real secret from a private store before
-  // exposing this service outside localhost. The contract surface is designed
-  // so bearer auth, mTLS, or another mechanism can be swapped without
-  // changing payloads.
-  devUser: {
-    userId: 'dev-user',
-    displayName: 'Dev User',
-    bearerToken: 'dev-token-change-me',
+  // End-user authentication is delegated to the Swirlock Identity Provider
+  // (`swirlock-idp-base`). The orchestrator validates IdP-issued JWT access
+  // tokens against the IdP's JWKS on every WebSocket upgrade.
+  //
+  // - `idpIssuer`: must match the `iss` claim in incoming tokens.
+  // - `audience`: this orchestrator's own resource indicator. The chatbot
+  //   UI requests tokens with `resource=<this URL>`, the IdP issues a JWT
+  //   with that `aud`, and the orchestrator rejects tokens for any other
+  //   audience.
+  auth: {
+    idpIssuer: 'http://127.0.0.1:3300/oidc',
+    audience: 'http://127.0.0.1:3200',
   },
 
   database: {
