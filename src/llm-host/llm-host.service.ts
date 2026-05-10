@@ -6,6 +6,7 @@ import {
   OnModuleInit,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 import { SERVICE_CONFIG } from '../config/config';
 import type { ServiceConfig } from '../config/config';
@@ -75,6 +76,7 @@ export interface LlmStreamResult {
 export class LlmHostService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(LlmHostService.name);
   private client?: PersistentModelHostSocket;
+  private cachedModelId: string | null = null;
 
   constructor(@Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig) {}
 
@@ -86,6 +88,71 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
           `Vanamonde LLM Host persistent socket unavailable at startup (${this.cfg.llmHost.baseUrl}): ${err.message}`,
         );
       });
+    void this.getModelId().catch((err: Error) => {
+      this.log.warn(`Could not fetch LLM model id at startup: ${err.message}`);
+    });
+  }
+
+  /**
+   * Returns the LLM model identifier (e.g. `gemma3:12b`) reported by the
+   * Vanamonde LLM Host. The orchestrator passes this value through to
+   * client apps unchanged so they can interpolate it into persona
+   * system prompts. Cached after the first successful fetch.
+   */
+  async getModelId(): Promise<string> {
+    if (this.cachedModelId) return this.cachedModelId;
+    const baseUrl = this.cfg.llmHost.baseUrl.replace(/\/$/, '');
+    const wsUrl = baseUrl.replace(/^http/, 'ws') + '/v5/model';
+    const correlationId = randomUUID();
+    const id = await new Promise<string>((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      const timer = setTimeout(() => {
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+        reject(new Error('model.status timeout'));
+      }, this.cfg.llmHost.timeoutMs);
+      ws.on('open', () => {
+        ws.send(JSON.stringify({ type: 'model.status', correlationId }));
+      });
+      ws.on('message', (raw) => {
+        try {
+          const env = JSON.parse(rawToString(raw)) as RawLlmEnvelope;
+          if (env.correlationId !== correlationId) return;
+          clearTimeout(timer);
+          try {
+            ws.close();
+          } catch {
+            /* ignore */
+          }
+          if (env.type === 'error') {
+            reject(new Error(env.error?.message ?? 'model.status failed'));
+            return;
+          }
+          const modelId =
+            isRecord(env.payload) && typeof env.payload.modelId === 'string'
+              ? env.payload.modelId
+              : '';
+          if (!modelId) {
+            reject(new Error('model.status returned no modelId'));
+            return;
+          }
+          resolve(modelId);
+        } catch (err) {
+          clearTimeout(timer);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
+      ws.on('error', (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    this.cachedModelId = id;
+    this.log.log(`LLM model id resolved: ${id}`);
+    return id;
   }
 
   onModuleDestroy(): void {
@@ -211,10 +278,14 @@ interface PendingInferRequest {
 }
 
 interface RawLlmEnvelope {
-  type?: unknown;
-  correlationId?: unknown;
+  type?: string;
+  correlationId?: string;
   payload?: unknown;
   error?: { code?: string; message?: string; retryable?: boolean };
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 class PersistentModelHostSocket {
@@ -572,8 +643,4 @@ class PersistentModelHostSocket {
         return null;
     }
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

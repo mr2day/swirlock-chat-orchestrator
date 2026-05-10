@@ -15,9 +15,6 @@ import type { LlmMessage } from '../../llm-host/llm-host.service';
  *   user-visible reply in plain text.
  */
 
-const PERSONA_LINE =
-  "Your name is Gigi the Robot, but don't say it and don't greet unless asked for your name or greeted.";
-
 function userContextLine(args: {
   cityCountry: string | null;
   dateTime: string;
@@ -36,10 +33,11 @@ export function buildAssessmentPrompt(args: {
   cityCountry: string | null;
   dateTime: string;
   recentHistoryBlock: string | null;
+  personaSystemPrompt: string | null;
 }): LlmMessage[] {
-  const meta = [
-    '[__meta_section__]',
-    PERSONA_LINE,
+  const meta = ['[__meta_section__]'];
+  if (args.personaSystemPrompt) meta.push(args.personaSystemPrompt);
+  meta.push(
     userContextLine(args),
     '',
     'This is a meta-section part of the conversation which is invisible to the user. The user\'s location and dateTime above are already provided to you, so you do NOT need to use [command="LOCATION"] or [command="DATE_TIME"] just to get those values for the user — they are already in this meta-section.',
@@ -59,7 +57,7 @@ export function buildAssessmentPrompt(args: {
     'Wrap your response in meta-section tags, like this: [__meta_section__][command="SEARCH"][search_prompt="..."][/__meta_section__]. Do not write the user-visible answer in this round; only the command tags.',
     '',
     LANGUAGE_RULE,
-  ];
+  );
 
   if (args.recentHistoryBlock) {
     meta.push(
@@ -86,14 +84,15 @@ export function buildAnswerPrompt(args: {
   dateTime: string;
   fulfilledContext: string | null;
   recentHistoryBlock: string | null;
+  personaSystemPrompt: string | null;
 }): LlmMessage[] {
-  const lines: string[] = [
-    '[__meta_section__]',
-    PERSONA_LINE,
+  const lines: string[] = ['[__meta_section__]'];
+  if (args.personaSystemPrompt) lines.push(args.personaSystemPrompt);
+  lines.push(
     userContextLine(args),
     '',
     'This is a meta-section part of the conversation which is invisible to the user.',
-  ];
+  );
 
   if (args.fulfilledContext) {
     lines.push('', 'Information gathered for this turn:', args.fulfilledContext);

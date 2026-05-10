@@ -8,6 +8,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import WebSocket from 'ws';
 import { FragmenterClientService } from '../fragmenter/fragmenter-client.service';
+import { LlmHostService } from '../llm-host/llm-host.service';
 import type { UserLocation } from '../rag/rag.service';
 import { ChatSessionService } from './chat-session.service';
 import {
@@ -82,6 +83,7 @@ export class ChatStreamHandler {
     private readonly sessions: ChatSessionService,
     private readonly flow: ReverseControlFlowService,
     private readonly fragmenter: FragmenterClientService,
+    private readonly llm: LlmHostService,
   ) {}
 
   async handle(ws: WebSocket, ctx: ConnectionContext): Promise<void> {
@@ -196,6 +198,25 @@ export class ChatStreamHandler {
           checkedAt: new Date().toISOString(),
         },
       });
+      return;
+    }
+
+    if (envelope.type === 'model.status') {
+      try {
+        const modelId = await this.llm.getModelId();
+        this.send(ws, {
+          type: 'model.status',
+          correlationId: envelope.correlationId,
+          payload: { modelId },
+        });
+      } catch (err) {
+        this.sendError(
+          ws,
+          envelope.correlationId,
+          503,
+          err instanceof Error ? err.message : 'model.status failed',
+        );
+      }
       return;
     }
 

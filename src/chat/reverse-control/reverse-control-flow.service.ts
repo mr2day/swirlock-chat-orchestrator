@@ -28,8 +28,6 @@ import {
 } from '../chat-session.service';
 import { ConversationHistoryService } from '../conversation/conversation-history.service';
 import { GeocodingService } from '../location/geocoding.service';
-import { PersonaIdentityService } from '../persona/persona-identity.service';
-import type { PersonaIdentityCapsule } from '../persona/persona-identity.service';
 import { DecisionTraceService } from '../trace/decision-trace.service';
 import type { ConversationMessage } from '../conversation/conversation-history.service';
 import type { SubmitTurnDto } from '../dto/submit-turn.dto';
@@ -68,8 +66,6 @@ export interface TurnDoneEnvelope {
   diagnostics?: {
     commands: string[];
     thinkingUsed: boolean;
-    personaId: string;
-    identityVersion: number;
   };
 }
 
@@ -92,7 +88,7 @@ interface PreparedTurnContext {
   correlationId: string;
   turnId: string;
   userText: string;
-  identity: PersonaIdentityCapsule;
+  personaSystemPrompt: string | null;
   history: ConversationMessage[];
   llmParts: LlmInputPart[];
   initialLocation: UserLocation | undefined;
@@ -131,7 +127,6 @@ export class ReverseControlFlowService {
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly sessions: ChatSessionService,
     private readonly history: ConversationHistoryService,
-    private readonly persona: PersonaIdentityService,
     private readonly fragmenter: FragmenterClientService,
     private readonly geocoding: GeocodingService,
     private readonly llm: LlmHostService,
@@ -164,6 +159,7 @@ export class ReverseControlFlowService {
         cityCountry,
         dateTime,
         recentHistoryBlock: this.renderHistoryBlock(ctx.history),
+        personaSystemPrompt: ctx.personaSystemPrompt,
       });
 
       onPhase?.({
@@ -287,6 +283,7 @@ export class ReverseControlFlowService {
         dateTime,
         fulfilledContext: this.renderFulfilledBlock(fulfilled),
         recentHistoryBlock: this.renderHistoryBlock(ctx.history),
+        personaSystemPrompt: ctx.personaSystemPrompt,
       });
 
       const finalCap = this.capping.forFinalAnswer({ messages: answerMessages });
@@ -371,8 +368,6 @@ export class ReverseControlFlowService {
               diagnostics: {
                 commands: [...parsed.commands],
                 thinkingUsed: thinkingForAnswer,
-                personaId: ctx.identity.personaId,
-                identityVersion: ctx.identity.identityVersion,
               },
             }
           : {}),
@@ -406,12 +401,6 @@ export class ReverseControlFlowService {
     input.onAccepted();
 
     const view = this.history.loadHistoryView(input.sessionId);
-    const identity = this.persona.prepareCapsule({
-      personaId: session.personaId,
-      userId: session.userId,
-      sessionId: input.sessionId,
-      occurredAt: input.dto.message.occurredAt,
-    });
 
     const llmParts: LlmInputPart[] = imageParts.map((p) => ({
       type: 'image' as const,
@@ -431,7 +420,7 @@ export class ReverseControlFlowService {
       correlationId: input.correlationId,
       turnId: randomUUID(),
       userText,
-      identity,
+      personaSystemPrompt: session.personaSystemPrompt,
       history: view.messages,
       llmParts,
       initialLocation,

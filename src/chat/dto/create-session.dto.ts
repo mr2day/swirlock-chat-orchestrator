@@ -14,10 +14,22 @@ class ParticipantDto {
 class AppDto {
   @IsString()
   appId!: string;
+}
 
-  @IsOptional()
+/**
+ * Per-session persona variable supplied by the client app.
+ *
+ * The orchestrator does not own persona definitions; it holds whatever
+ * the client app sends here for the lifetime of the session and pipes
+ * `systemPrompt` to the LLM on every turn. The client app is the single
+ * source of truth for persona name, prompt, and any persona-side state.
+ */
+class PersonaDto {
   @IsString()
-  personaId?: string;
+  name!: string;
+
+  @IsString()
+  systemPrompt!: string;
 }
 
 class ClientDto {
@@ -42,6 +54,11 @@ export class CreateSessionDto {
   @ValidateNested()
   @Type(() => AppDto)
   app!: AppDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => PersonaDto)
+  persona?: PersonaDto;
 
   @IsOptional()
   @ValidateNested()
