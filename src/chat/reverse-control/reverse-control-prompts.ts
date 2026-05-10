@@ -23,13 +23,12 @@ function userContextLine(args: {
   dateTime: string;
 }): string {
   if (args.cityCountry) {
-    return `The user is geographically located in ${args.cityCountry} and their dateTime is ${args.dateTime}. The user's location does NOT determine their preferred language — do not assume they want a reply in the local language. Always reply in the language of their most recent query, regardless of where they are.`;
+    return `The user is geographically located in ${args.cityCountry} and their dateTime is ${args.dateTime}.`;
   }
   return `The user's location is currently unknown. Their dateTime is ${args.dateTime}.`;
 }
 
-const LANGUAGE_RULE =
-  "Detect the language of the user's most recent query (the [__user_query__] block at the bottom of this prompt) and reply in exactly that language. If the user wrote in English, reply in English. If they wrote in Romanian, reply in Romanian. If French, French. Match the language of the latest user message exactly. Do NOT infer language from the user's location, from earlier turns of the conversation, or from the language in which the topic is most-documented.";
+const LANGUAGE_RULE = 'Always answer in the language the user query is in.';
 
 export function buildAssessmentPrompt(args: {
   userText: string;
