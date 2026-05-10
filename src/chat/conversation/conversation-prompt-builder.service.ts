@@ -31,16 +31,14 @@ const RECENT_HISTORY_LIMIT = 12;
 @Injectable()
 export class ConversationPromptBuilderService {
   buildMessages(input: BuildConversationPromptInput): LlmMessage[] {
-    const messages: LlmMessage[] = [
-      { role: 'system', content: input.identity.coreMessage },
-    ];
+    const messages: LlmMessage[] = [];
 
-    if (input.identity.contextualMessage) {
-      messages.push({
-        role: 'system',
-        content: input.identity.contextualMessage,
-      });
-    }
+    // Persona system prompts disabled — debug log readability.
+    // To re-enable, uncomment:
+    // messages.push({ role: 'system', content: input.identity.coreMessage });
+    // if (input.identity.contextualMessage) {
+    //   messages.push({ role: 'system', content: input.identity.contextualMessage });
+    // }
 
     if (input.consolidation.sessionSummary) {
       messages.push({

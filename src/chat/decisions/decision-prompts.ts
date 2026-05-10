@@ -61,10 +61,11 @@ export interface QueryGenerationContext {
 
 export function buildGenerateSearchQueryPrompt(
   userText: string,
+  occurredAt: string,
   location?: QueryGenerationContext,
 ): LlmMessage[] {
   const locationHint = location?.cityName
-    ? `\n\nThe user is in ${location.cityName}${location.countryName ? `, ${location.countryName}` : ''}. Include the city name in the query when the question is location-dependent (weather, near-me, local prices). Do not include raw coordinates.`
+    ? `\nThe user is in ${location.cityName}${location.countryName ? `, ${location.countryName}` : ''}. Include the city name in the query when the question is location-dependent (weather, near-me, local prices, local news). Do not include raw coordinates.`
     : '';
 
   return [
@@ -73,8 +74,8 @@ export function buildGenerateSearchQueryPrompt(
       content: [
         'Rewrite the user message as a self-contained, search-engine-friendly query.',
         '',
-        'Drop fillers and conversational framing. Keep the entities, the time scope, and any location.' +
-          locationHint,
+        'Drop fillers and conversational framing. Keep the entities, the time scope, and any location.',
+        `Today's date is ${occurredAt} (ISO 8601). If the user message contains time-now references — "today", "now", "current", "azi", "acum", "ultim*", "stiri", "latest", "recent" — include the actual date in the query in human-readable form (e.g. "10 May 2026", or "10 mai 2026" if the user wrote in Romanian). Never leave time-now words in the query unresolved; convert them to the date.${locationHint}`,
         '',
         'Respond with exactly: ⟦query⟧YOUR QUERY⟦/query⟧',
         '',

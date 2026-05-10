@@ -199,6 +199,7 @@ export class ConversationFlowService {
           correlationId: ctx.correlationId,
           abortSignal: input.abortSignal,
           userText: ctx.userText,
+          occurredAt: ctx.occurredAt,
           ...(location
             ? {
                 location: {

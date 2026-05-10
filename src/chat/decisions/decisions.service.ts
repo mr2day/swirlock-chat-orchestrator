@@ -41,6 +41,7 @@ export interface NeedsLocationInput extends DecisionCallContext {
 
 export interface GenerateSearchQueryInput extends DecisionCallContext {
   userText: string;
+  occurredAt: string;
   location?: { cityName?: string; countryName?: string };
 }
 
@@ -163,6 +164,7 @@ export class DecisionsService {
     const phase = 'decision.generateSearchQuery';
     const messages = buildGenerateSearchQueryPrompt(
       input.userText,
+      input.occurredAt,
       input.location,
     );
     const result = await this.runUtilitarian({

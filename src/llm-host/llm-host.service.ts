@@ -108,6 +108,21 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
     onEvent?: (event: LlmStreamEvent) => void;
     abortSignal?: AbortSignal;
   }): Promise<LlmStreamResult> {
+    console.log('===== LLM PROMPT =====');
+    console.log('correlationId:', args.correlationId);
+    console.log('options:', JSON.stringify(args.options ?? {}));
+    if (args.messages) {
+      for (const m of args.messages) {
+        console.log(`--- [${m.role}] ---`);
+        console.log(m.content);
+      }
+    }
+    if (args.parts) {
+      console.log('--- parts ---');
+      console.log(JSON.stringify(args.parts));
+    }
+    console.log('======================');
+
     const result = await this.modelHost().streamInfer({
       correlationId: args.correlationId,
       request: this.buildInferRequest(args),
