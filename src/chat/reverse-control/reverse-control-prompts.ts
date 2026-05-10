@@ -174,7 +174,14 @@ export function buildAnswerPrompt(args: {
   // discipline doesn't cost personality.
   const systemParts: string[] = [];
   if (args.personaSystemPrompt) systemParts.push(args.personaSystemPrompt);
-  if (args.fulfilledContext) systemParts.push(SOURCE_GROUNDING_RULE);
+  if (args.fulfilledContext) {
+    systemParts.push(SOURCE_GROUNDING_RULE);
+    // The grounding rule is in English; without an explicit language
+    // directive the model drifts into English even when the user query
+    // and the sources are in another language (e.g. user asked in
+    // Romanian, got Romanian sources, model still answered in English).
+    systemParts.push(LANGUAGE_RULE);
+  }
   const messages: LlmMessage[] = [];
   if (systemParts.length > 0) {
     messages.push({ role: 'system', content: systemParts.join('\n\n') });
