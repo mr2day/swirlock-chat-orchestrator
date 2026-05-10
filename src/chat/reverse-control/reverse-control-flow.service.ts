@@ -290,7 +290,7 @@ export class ReverseControlFlowService {
       });
 
       const finalCap = this.capping.forFinalAnswer({ messages: answerMessages });
-      const finalOllama: Record<string, unknown> = { temperature: 0 };
+      const finalOllama: Record<string, unknown> = {};
       if (finalCap !== undefined) finalOllama.num_predict = finalCap;
 
       const finalResult = await this.llm.streamInfer({
@@ -300,7 +300,7 @@ export class ReverseControlFlowService {
         options: {
           responseFormat: 'text',
           thinking: thinkingForAnswer,
-          ollama: finalOllama,
+          ...(Object.keys(finalOllama).length > 0 ? { ollama: finalOllama } : {}),
         },
         abortSignal: input.abortSignal,
         onEvent: (evt) => {
