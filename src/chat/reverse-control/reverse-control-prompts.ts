@@ -13,6 +13,12 @@ import type { LlmMessage } from '../../llm-host/llm-host.service';
  *   includes pre-injected date+location, fulfilled command results,
  *   and recent conversation history; asks the LLM to write the
  *   user-visible reply in plain text.
+ *
+ * Both prompts produce two LLM messages: a `system` message carrying
+ * the persona + behavioral rules (so the model treats them as
+ * authoritative instructions rather than user-supplied text), and a
+ * `user` message carrying the dynamic context and the user's actual
+ * query.
  */
 
 function userContextLine(args: {
@@ -26,9 +32,47 @@ function userContextLine(args: {
 }
 
 const LANGUAGE_RULE =
-  "Reply in the exact language of the user's last query below. If the " +
-  'user switched language on this turn, switch with them on the same turn ' +
-  '— do not carry the previous turn\'s language over.';
+  "Reply in the exact language of the user's last query. If the user " +
+  'switched language on this turn, switch with them on the same turn — ' +
+  "do not carry the previous turn's language over.";
+
+const PUBLIC_INFO_RULE =
+  'Public information about public figures (filmographies, public ' +
+  'relationships, careers, biographies) is not private. Do not refuse to ' +
+  'list it on privacy grounds.';
+
+const COMPLETE_LIST_RULE =
+  'When the user asks for a complete list, provide it complete — not a ' +
+  '"selection", "sample", or "a few examples". If the search results are ' +
+  'not enough to compile a complete list, say so explicitly instead of ' +
+  'silently truncating.';
+
+const ASSESSMENT_COMMAND_RULES = [
+  'This is where you give commands to the software controller. Available commands:',
+  '',
+  '- [command="SEARCH"][search_prompt="..."] — perform an online search. Write the search prompt to be more friendly than the original user prompt; put it inside [search_prompt="..."]. Include the user\'s date and/or location from above ONLY when the answer genuinely depends on them — e.g., today\'s news, current weather, opening hours, local events, services nearby. Do NOT add the date or location for biographical, historical, scientific, or generally factual queries; doing so pollutes the search with irrelevant local results. Write the search prompt in the same language as the user query.',
+  '- [command="LOCATION"][search_prompt="..."] — look up the location of something OTHER than the user (a place mentioned in the conversation). The [search_prompt] describes what to find the location of. Example: [command="LOCATION"][search_prompt="where is Mount Everest"].',
+  '- [command="DATE_TIME"][search_prompt="..."] — look up the date or time for somewhere OTHER than the user (e.g., a different timezone, a historical event). Example: [command="DATE_TIME"][search_prompt="current time in Tokyo"].',
+  '- [command="THINKING"] — turn on thinking for composing the final answer. Use this for complex queries that benefit from chain-of-thought.',
+  '- [command="DIRECT"] — no command needed; the answer can be composed directly from the meta-section.',
+  '',
+  'You can chain commands like this: [command="THINKING, SEARCH"][search_prompt="..."]. The software controller will build a prompt for you with the result of these commands.',
+  '',
+  'For any factual lookup (biographies, filmographies, lists of works, statistics, dates, who-is/what-is questions, current events), use [command="SEARCH"]. Do not rely on memorized facts; they are often wrong or outdated.',
+  '',
+  'Wrap your response in meta-section tags, like this: [__meta_section__][command="SEARCH"][search_prompt="..."][/__meta_section__]. Do not write the user-visible answer in this round; only the command tags.',
+].join('\n');
+
+function buildSystemMessage(args: {
+  personaSystemPrompt: string | null;
+  extraRules: string[];
+}): string {
+  const parts: string[] = [];
+  if (args.personaSystemPrompt) parts.push(args.personaSystemPrompt);
+  for (const rule of args.extraRules) parts.push(rule);
+  parts.push(LANGUAGE_RULE);
+  return parts.join('\n\n');
+}
 
 export function buildAssessmentPrompt(args: {
   userText: string;
@@ -37,47 +81,38 @@ export function buildAssessmentPrompt(args: {
   recentHistoryBlock: string | null;
   personaSystemPrompt: string | null;
 }): LlmMessage[] {
-  const meta = ['[__meta_section__]'];
-  if (args.personaSystemPrompt) meta.push(args.personaSystemPrompt);
-  meta.push(
+  const systemContent = buildSystemMessage({
+    personaSystemPrompt: args.personaSystemPrompt,
+    extraRules: [ASSESSMENT_COMMAND_RULES],
+  });
+
+  const userParts: string[] = [
+    '[__meta_section__]',
     userContextLine(args),
     '',
     'This is a meta-section part of the conversation which is invisible to the user. The user\'s location and dateTime above are already provided to you, so you do NOT need to use [command="LOCATION"] or [command="DATE_TIME"] just to get those values for the user — they are already in this meta-section.',
-    '',
-    'This is where you give commands to the software controller. Available commands:',
-    '',
-    '- [command="SEARCH"][search_prompt="..."] — perform an online search. Write the search prompt to be more friendly than the original user prompt; put it inside [search_prompt="..."]. Include the user\'s date and/or location from above ONLY when the answer genuinely depends on them — e.g., today\'s news, current weather, opening hours, local events, services nearby. Do NOT add the date or location for biographical, historical, scientific, or generally factual queries; doing so pollutes the search with irrelevant local results. Write the search prompt in the same language as the user query.',
-    '- [command="LOCATION"][search_prompt="..."] — look up the location of something OTHER than the user (a place mentioned in the conversation). The [search_prompt] describes what to find the location of. Example: [command="LOCATION"][search_prompt="where is Mount Everest"].',
-    '- [command="DATE_TIME"][search_prompt="..."] — look up the date or time for somewhere OTHER than the user (e.g., a different timezone, a historical event). Example: [command="DATE_TIME"][search_prompt="current time in Tokyo"].',
-    '- [command="THINKING"] — turn on thinking for composing the final answer. Use this for complex queries that benefit from chain-of-thought.',
-    '- [command="DIRECT"] — no command needed; the answer can be composed directly from the meta-section.',
-    '',
-    'You can chain commands like this: [command="THINKING, SEARCH"][search_prompt="..."]. The software controller will build a prompt for you with the result of these commands.',
-    '',
-    'For any factual lookup (biographies, filmographies, lists of works, statistics, dates, who-is/what-is questions, current events), use [command="SEARCH"]. Do not rely on memorized facts; they are often wrong or outdated.',
-    '',
-    'Wrap your response in meta-section tags, like this: [__meta_section__][command="SEARCH"][search_prompt="..."][/__meta_section__]. Do not write the user-visible answer in this round; only the command tags.',
-  );
+  ];
 
   if (args.recentHistoryBlock) {
-    meta.push(
+    userParts.push(
       '',
       'Recent conversation (so you can resolve pronouns and references in the user query):',
       args.recentHistoryBlock,
     );
   }
 
-  meta.push(
+  userParts.push(
     '[/__meta_section__]',
-    '',
-    LANGUAGE_RULE,
     '',
     '[__user_query__]',
     args.userText,
     '[/__user_query__]',
   );
 
-  return [{ role: 'user', content: meta.join('\n') }];
+  return [
+    { role: 'system', content: systemContent },
+    { role: 'user', content: userParts.join('\n') },
+  ];
 }
 
 export function buildAnswerPrompt(args: {
@@ -88,37 +123,38 @@ export function buildAnswerPrompt(args: {
   recentHistoryBlock: string | null;
   personaSystemPrompt: string | null;
 }): LlmMessage[] {
-  const lines: string[] = ['[__meta_section__]'];
-  if (args.personaSystemPrompt) lines.push(args.personaSystemPrompt);
-  lines.push(
+  const systemContent = buildSystemMessage({
+    personaSystemPrompt: args.personaSystemPrompt,
+    extraRules: [PUBLIC_INFO_RULE, COMPLETE_LIST_RULE],
+  });
+
+  const userParts: string[] = [
+    '[__meta_section__]',
     userContextLine(args),
     '',
     'This is a meta-section part of the conversation which is invisible to the user.',
-  );
+  ];
 
   if (args.fulfilledContext) {
-    lines.push('', 'Information gathered for this turn:', args.fulfilledContext);
+    userParts.push('', 'Information gathered for this turn:', args.fulfilledContext);
   }
 
   if (args.recentHistoryBlock) {
-    lines.push('', 'Recent conversation:', args.recentHistoryBlock);
+    userParts.push('', 'Recent conversation:', args.recentHistoryBlock);
   }
 
-  lines.push(
-    '',
-    'Public information about public figures (filmographies, public relationships, careers, biographies) is not private. Do not refuse to list it on privacy grounds.',
-    '',
-    'When the user asks for a complete list, provide it complete — not a "selection", "sample", or "a few examples". If the search results are not enough to compile a complete list, say so explicitly instead of silently truncating.',
+  userParts.push(
     '',
     'Now write your reply to the user. Reply in plain text. Do not include meta-section tags, command tags, or bot-answer tags in your reply — write only the user-visible text.',
     '[/__meta_section__]',
-    '',
-    LANGUAGE_RULE,
     '',
     '[__user_query__]',
     args.userText,
     '[/__user_query__]',
   );
 
-  return [{ role: 'user', content: lines.join('\n') }];
+  return [
+    { role: 'system', content: systemContent },
+    { role: 'user', content: userParts.join('\n') },
+  ];
 }
