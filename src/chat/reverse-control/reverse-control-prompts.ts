@@ -143,20 +143,20 @@ export function buildAnswerPrompt(args: {
   history: HistoryTurn[];
   personaSystemPrompt: string | null;
 }): LlmMessage[] {
-  // System message stays small on purpose. A bigger system prompt full
-  // of policy clauses ("public figures aren't private", "lists should
-  // be complete", "the user is in Bucharest", ...) primes the model
-  // into a flat policy-document tone — the model mirrors what it sees.
-  // Persona + language rule is enough. Per-turn factual context (date,
-  // location, search results) is inlined with the current user query
-  // when it's actually relevant for that turn.
-  const systemParts: string[] = [];
-  if (args.personaSystemPrompt) systemParts.push(args.personaSystemPrompt);
-  systemParts.push(LANGUAGE_RULE);
-
-  const messages: LlmMessage[] = [
-    { role: 'system', content: systemParts.join('\n\n') },
-  ];
+  // System message contains ONLY the persona prompt. Anything more —
+  // even a single "always reply in the user's language" line — primes
+  // the model into a flatter, policy-document tone. Empirically (see
+  // scripts/replay-gigi.mjs in swirlock-idp-base):
+  //   - persona + 4 cross-cutting rules  → "I am functioning optimally."
+  //   - persona + LANGUAGE_RULE          → "I am well, thank you!"
+  //   - persona alone                    → "My circuits are humming!"
+  // Language switching still works without LANGUAGE_RULE: the model
+  // naturally follows the last user message's language (verified RO→EN
+  // in scripts/replay-lang.mjs).
+  const messages: LlmMessage[] = [];
+  if (args.personaSystemPrompt) {
+    messages.push({ role: 'system', content: args.personaSystemPrompt });
+  }
 
   for (const turn of args.history) {
     messages.push({ role: turn.role, content: turn.content });
