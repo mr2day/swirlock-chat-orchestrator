@@ -53,8 +53,6 @@ export function buildAssessmentPrompt(args: {
     'Wrap your response in meta-section tags, like this: [__meta_section__][command="SEARCH"][search_prompt="..."][/__meta_section__]. Do not write the user-visible answer in this round; only the command tags.',
     '',
     'Always write your answer to the user in the language of the user query.',
-    '',
-    `Do you think that, in order to answer accurately to the following user query: "${args.userText}", you would need to perform an online search, look up the location or date/time of something other than the user, or use thinking?`,
     '[/__meta_section__]',
     '',
     '[__user_query__]',
