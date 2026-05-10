@@ -51,9 +51,11 @@ export function buildAssessmentPrompt(args: {
     '',
     'You can chain commands like this: [command="THINKING, SEARCH"][search_prompt="..."]. The software controller will build a prompt for you with the result of these commands.',
     '',
+    'For any factual lookup (biographies, filmographies, lists of works, statistics, dates, who-is/what-is questions, current events), use [command="SEARCH"]. Do not rely on memorized facts; they are often wrong or outdated.',
+    '',
     'Wrap your response in meta-section tags, like this: [__meta_section__][command="SEARCH"][search_prompt="..."][/__meta_section__]. Do not write the user-visible answer in this round; only the command tags.',
     '',
-    'Always write your answer to the user in the language of the user query.',
+    'Reply in the user\'s language. If the user wrote in Romanian, reply in Romanian — do not switch to French, English, or any other language even if the topic is most-documented in another language.',
   ];
 
   if (args.recentHistoryBlock) {
@@ -100,7 +102,13 @@ export function buildAnswerPrompt(args: {
 
   lines.push(
     '',
-    'Now write your reply to the user. Reply in plain text, in the same language as the user query. Do not include meta-section tags, command tags, or bot-answer tags in your reply — write only the user-visible text.',
+    'Reply in the user\'s language. If the user wrote in Romanian, reply in Romanian — do not switch to French, English, or any other language even if the topic is most-documented in another language.',
+    '',
+    'Public information about public figures (filmographies, public relationships, careers, biographies) is not private. Do not refuse to list it on privacy grounds.',
+    '',
+    'When the user asks for a complete list, provide it complete — not a "selection", "sample", or "a few examples". If the search results are not enough to compile a complete list, say so explicitly instead of silently truncating.',
+    '',
+    'Now write your reply to the user. Reply in plain text. Do not include meta-section tags, command tags, or bot-answer tags in your reply — write only the user-visible text.',
     '[/__meta_section__]',
     '',
     '[__user_query__]',
