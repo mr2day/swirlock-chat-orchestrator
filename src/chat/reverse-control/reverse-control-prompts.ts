@@ -28,7 +28,8 @@ function userContextLine(args: {
   return `The user's location is currently unknown. Their dateTime is ${args.dateTime}.`;
 }
 
-const LANGUAGE_RULE = 'Always answer in the language the user query is in.';
+const LANGUAGE_RULE =
+  'Always answer in the language of the immediately last user query. Switch languages as the user switches them.';
 
 export function buildAssessmentPrompt(args: {
   userText: string;
