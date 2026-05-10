@@ -163,6 +163,7 @@ export class ReverseControlFlowService {
         userText: ctx.userText,
         cityCountry,
         dateTime,
+        recentHistoryBlock: this.renderHistoryBlock(ctx.history),
       });
 
       onPhase?.({

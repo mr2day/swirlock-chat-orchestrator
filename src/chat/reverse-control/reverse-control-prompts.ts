@@ -32,6 +32,7 @@ export function buildAssessmentPrompt(args: {
   userText: string;
   cityCountry: string | null;
   dateTime: string;
+  recentHistoryBlock: string | null;
 }): LlmMessage[] {
   const meta = [
     '[__meta_section__]',
@@ -53,14 +54,25 @@ export function buildAssessmentPrompt(args: {
     'Wrap your response in meta-section tags, like this: [__meta_section__][command="SEARCH"][search_prompt="..."][/__meta_section__]. Do not write the user-visible answer in this round; only the command tags.',
     '',
     'Always write your answer to the user in the language of the user query.',
+  ];
+
+  if (args.recentHistoryBlock) {
+    meta.push(
+      '',
+      'Recent conversation (so you can resolve pronouns and references in the user query):',
+      args.recentHistoryBlock,
+    );
+  }
+
+  meta.push(
     '[/__meta_section__]',
     '',
     '[__user_query__]',
     args.userText,
     '[/__user_query__]',
-  ].join('\n');
+  );
 
-  return [{ role: 'user', content: meta }];
+  return [{ role: 'user', content: meta.join('\n') }];
 }
 
 export function buildAnswerPrompt(args: {
