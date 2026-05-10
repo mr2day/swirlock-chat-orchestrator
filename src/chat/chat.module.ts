@@ -9,7 +9,8 @@ import { ChatStreamHandler } from './chat-stream.handler';
 import { ConversationHistoryService } from './conversation/conversation-history.service';
 import { LocationModule } from './location/location.module';
 import { PersonaIdentityService } from './persona/persona-identity.service';
-import { ReverseControlModule } from './reverse-control/reverse-control.module';
+import { NeedFulfillerService } from './reverse-control/need-fulfiller.service';
+import { ReverseControlFlowService } from './reverse-control/reverse-control-flow.service';
 import { DecisionTraceService } from './trace/decision-trace.service';
 
 @Module({
@@ -20,14 +21,15 @@ import { DecisionTraceService } from './trace/decision-trace.service';
     FragmenterModule,
     LocationModule,
     CappingModule,
-    ReverseControlModule,
   ],
   providers: [
     ChatSessionService,
     ChatStreamHandler,
     ConversationHistoryService,
     DecisionTraceService,
+    NeedFulfillerService,
     PersonaIdentityService,
+    ReverseControlFlowService,
   ],
   exports: [ChatStreamHandler],
 })
