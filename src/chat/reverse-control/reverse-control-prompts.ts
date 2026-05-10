@@ -26,7 +26,9 @@ function userContextLine(args: {
 }
 
 const LANGUAGE_RULE =
-  'Always answer in the language of the immediately last user query. Switch languages as the user switches them.';
+  "Reply in the exact language of the user's last query below. If the " +
+  'user switched language on this turn, switch with them on the same turn ' +
+  '— do not carry the previous turn\'s language over.';
 
 export function buildAssessmentPrompt(args: {
   userText: string;
@@ -55,8 +57,6 @@ export function buildAssessmentPrompt(args: {
     'For any factual lookup (biographies, filmographies, lists of works, statistics, dates, who-is/what-is questions, current events), use [command="SEARCH"]. Do not rely on memorized facts; they are often wrong or outdated.',
     '',
     'Wrap your response in meta-section tags, like this: [__meta_section__][command="SEARCH"][search_prompt="..."][/__meta_section__]. Do not write the user-visible answer in this round; only the command tags.',
-    '',
-    LANGUAGE_RULE,
   );
 
   if (args.recentHistoryBlock) {
@@ -69,6 +69,8 @@ export function buildAssessmentPrompt(args: {
 
   meta.push(
     '[/__meta_section__]',
+    '',
+    LANGUAGE_RULE,
     '',
     '[__user_query__]',
     args.userText,
@@ -104,14 +106,14 @@ export function buildAnswerPrompt(args: {
 
   lines.push(
     '',
-    LANGUAGE_RULE,
-    '',
     'Public information about public figures (filmographies, public relationships, careers, biographies) is not private. Do not refuse to list it on privacy grounds.',
     '',
     'When the user asks for a complete list, provide it complete — not a "selection", "sample", or "a few examples". If the search results are not enough to compile a complete list, say so explicitly instead of silently truncating.',
     '',
     'Now write your reply to the user. Reply in plain text. Do not include meta-section tags, command tags, or bot-answer tags in your reply — write only the user-visible text.',
     '[/__meta_section__]',
+    '',
+    LANGUAGE_RULE,
     '',
     '[__user_query__]',
     args.userText,
