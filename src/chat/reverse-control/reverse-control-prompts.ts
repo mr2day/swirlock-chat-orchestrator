@@ -143,15 +143,15 @@ export function buildAnswerPrompt(args: {
   history: HistoryTurn[];
   personaSystemPrompt: string | null;
 }): LlmMessage[] {
+  // System message stays small on purpose. A bigger system prompt full
+  // of policy clauses ("public figures aren't private", "lists should
+  // be complete", "the user is in Bucharest", ...) primes the model
+  // into a flat policy-document tone — the model mirrors what it sees.
+  // Persona + language rule is enough. Per-turn factual context (date,
+  // location, search results) is inlined with the current user query
+  // when it's actually relevant for that turn.
   const systemParts: string[] = [];
   if (args.personaSystemPrompt) systemParts.push(args.personaSystemPrompt);
-  systemParts.push(
-    args.cityCountry
-      ? `It is ${args.dateTime}. The user is in ${args.cityCountry}.`
-      : `It is ${args.dateTime}.`,
-  );
-  systemParts.push(PUBLIC_INFO_RULE);
-  systemParts.push(COMPLETE_LIST_RULE);
   systemParts.push(LANGUAGE_RULE);
 
   const messages: LlmMessage[] = [
@@ -162,8 +162,14 @@ export function buildAnswerPrompt(args: {
     messages.push({ role: turn.role, content: turn.content });
   }
 
-  const currentContent = args.fulfilledContext
-    ? `(Information gathered for this turn:\n${args.fulfilledContext}\n)\n\n${args.userText}`
+  const preambleParts: string[] = [];
+  if (args.fulfilledContext) {
+    preambleParts.push(
+      `(Information gathered for this turn:\n${args.fulfilledContext}\n)`,
+    );
+  }
+  const currentContent = preambleParts.length
+    ? `${preambleParts.join('\n\n')}\n\n${args.userText}`
     : args.userText;
   messages.push({ role: 'user', content: currentContent });
 
