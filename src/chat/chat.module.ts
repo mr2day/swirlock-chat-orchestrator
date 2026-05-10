@@ -6,12 +6,10 @@ import { RagModule } from '../rag/rag.module';
 import { CappingModule } from './capping/capping.module';
 import { ChatSessionService } from './chat-session.service';
 import { ChatStreamHandler } from './chat-stream.handler';
-import { ConversationFlowService } from './conversation/conversation-flow.service';
 import { ConversationHistoryService } from './conversation/conversation-history.service';
-import { ConversationPromptBuilderService } from './conversation/conversation-prompt-builder.service';
-import { DecisionsModule } from './decisions/decisions.module';
 import { LocationModule } from './location/location.module';
 import { PersonaIdentityService } from './persona/persona-identity.service';
+import { ReverseControlModule } from './reverse-control/reverse-control.module';
 import { DecisionTraceService } from './trace/decision-trace.service';
 
 @Module({
@@ -22,14 +20,12 @@ import { DecisionTraceService } from './trace/decision-trace.service';
     FragmenterModule,
     LocationModule,
     CappingModule,
-    DecisionsModule,
+    ReverseControlModule,
   ],
   providers: [
     ChatSessionService,
     ChatStreamHandler,
-    ConversationFlowService,
     ConversationHistoryService,
-    ConversationPromptBuilderService,
     DecisionTraceService,
     PersonaIdentityService,
   ],
