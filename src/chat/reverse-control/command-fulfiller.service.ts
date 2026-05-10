@@ -3,7 +3,6 @@ import { SERVICE_CONFIG } from '../../config/config';
 import type { ServiceConfig } from '../../config/config';
 import { RagService } from '../../rag/rag.service';
 import type { RetrievalStreamEvent, UserLocation } from '../../rag/rag.service';
-import { GeocodingService } from '../location/geocoding.service';
 import type { CommandKind, ParsedCommands } from './command-parser';
 
 export interface FulfillContext {
@@ -26,15 +25,16 @@ export interface FulfillmentResult {
 /**
  * Dispatches each parsed command to its handler.
  *
- * Commands fall into three groups:
+ * In the new pre-inject regime, the user's location and dateTime are
+ * already in the meta-section, so bare LOCATION/DATE_TIME commands are
+ * filtered out by the flow service before reaching us. What lands here
+ * is always a web-search request:
  *
- *   - Pure flags handled by the flow service (THINKING, DIRECT) — not
- *     fulfilled here.
- *   - Already-pre-injected values (LOCATION, DATE_TIME) — re-stated
- *     here for completeness when the LLM asks for them anyway, or
- *     fetched live if not yet known.
- *   - Real I/O commands (SEARCH) — calls RagService with the LLM's
- *     `search_prompt`.
+ *   - SEARCH                                  → RAG search (label SEARCH)
+ *   - LOCATION  + [search_prompt="..."]       → RAG search (label LOCATION)
+ *   - DATE_TIME + [search_prompt="..."]       → RAG search (label DATE_TIME)
+ *
+ * THINKING and DIRECT are flags handled in the flow service, not here.
  */
 @Injectable()
 export class CommandFulfillerService {
@@ -43,7 +43,6 @@ export class CommandFulfillerService {
   constructor(
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly rag: RagService,
-    private readonly geocoding: GeocodingService,
   ) {}
 
   async fulfill(
@@ -53,80 +52,19 @@ export class CommandFulfillerService {
     knownLocation: UserLocation | undefined,
   ): Promise<FulfillmentResult> {
     switch (command) {
-      case 'DATE_TIME':
-        return { command, value: this.formatDateTime(ctx.occurredAt) };
-
       case 'LOCATION':
-        return this.fulfillLocation(ctx, knownLocation);
-
+      case 'DATE_TIME':
       case 'SEARCH':
-        return this.fulfillSearch(parsed.searchPrompt, ctx, knownLocation);
+        return this.fulfillSearch(command, parsed.searchPrompt, ctx, knownLocation);
 
       case 'THINKING':
       case 'DIRECT':
-        // Handled in the flow service as flags, not as fulfilled values.
         return { command, value: '' };
     }
   }
 
-  private formatDateTime(occurredAt: string): string {
-    const d = new Date(occurredAt);
-    if (Number.isNaN(d.getTime())) return occurredAt;
-    const date = d.toLocaleDateString('en-GB', {
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric',
-    });
-    const time = d.toLocaleTimeString('en-GB', {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-    return `${date}, ${time}`;
-  }
-
-  private async fulfillLocation(
-    ctx: FulfillContext,
-    knownLocation: UserLocation | undefined,
-  ): Promise<FulfillmentResult> {
-    if (knownLocation) {
-      return { command: 'LOCATION', value: this.formatLocation(knownLocation) };
-    }
-    const raw = await ctx.resolveUserLocation();
-    if (!raw) {
-      return { command: 'LOCATION', value: 'unavailable' };
-    }
-    const enriched = await this.enrichLocation(raw);
-    return {
-      command: 'LOCATION',
-      value: this.formatLocation(enriched),
-      patch: { location: enriched },
-    };
-  }
-
-  private formatLocation(loc: UserLocation): string {
-    if (loc.cityName && loc.countryName) {
-      return `${loc.cityName}, ${loc.countryName}`;
-    }
-    if (loc.cityName) return loc.cityName;
-    return `lat ${loc.latitude}, lng ${loc.longitude}`;
-  }
-
-  private async enrichLocation(loc: UserLocation): Promise<UserLocation> {
-    const geo = await this.geocoding.reverseGeocode({
-      latitude: loc.latitude,
-      longitude: loc.longitude,
-    });
-    if (!geo) return loc;
-    return {
-      ...loc,
-      ...(geo.cityName ? { cityName: geo.cityName } : {}),
-      ...(geo.regionName ? { regionName: geo.regionName } : {}),
-      ...(geo.countryName ? { countryName: geo.countryName } : {}),
-      ...(geo.countryCode ? { countryCode: geo.countryCode } : {}),
-    };
-  }
-
   private async fulfillSearch(
+    label: CommandKind,
     searchPrompt: string | undefined,
     ctx: FulfillContext,
     knownLocation: UserLocation | undefined,
@@ -134,7 +72,7 @@ export class CommandFulfillerService {
     const query = searchPrompt?.trim() || ctx.userText.trim();
     if (!searchPrompt) {
       this.log.warn(
-        'SEARCH command emitted without a [search_prompt="..."] tag; falling back to userText.',
+        `${label} command emitted without a [search_prompt="..."] tag; falling back to userText.`,
       );
     }
 
@@ -154,7 +92,7 @@ export class CommandFulfillerService {
 
       if (result.evidence.length === 0) {
         return {
-          command: 'SEARCH',
+          command: label,
           value: `Search query "${query}" returned no results.`,
         };
       }
@@ -167,12 +105,12 @@ export class CommandFulfillerService {
         const snippet = ev.snippet ? `: ${ev.snippet}` : '';
         lines.push(`- ${ev.sourceTitle}${url}${snippet}`);
       }
-      return { command: 'SEARCH', value: lines.join('\n') };
+      return { command: label, value: lines.join('\n') };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.log.warn(`SEARCH fulfillment failed: ${message}`);
+      this.log.warn(`${label} search fulfillment failed: ${message}`);
       return {
-        command: 'SEARCH',
+        command: label,
         value: `Search for "${query}" failed: ${message}`,
       };
     }

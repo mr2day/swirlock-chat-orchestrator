@@ -212,18 +212,20 @@ export class ReverseControlFlowService {
       });
 
       // ------- fulfillment -------
-      // Order: LOCATION → DATE_TIME → SEARCH. THINKING and DIRECT are flags.
-      const order: CommandKind[] = ['LOCATION', 'DATE_TIME', 'SEARCH'];
-      for (const cmd of order) {
-        if (!parsed.commands.has(cmd)) continue;
-        const phaseId = `command.${cmd}`;
+      // LOCATION and DATE_TIME without a search_prompt are skipped:
+      // user values are already pre-injected in the meta-section.
+      // With a search_prompt, they trigger a labelled web search.
+      // SEARCH always runs a web search.
+      const fulfillment = this.planFulfillment(parsed);
+      for (const step of fulfillment) {
+        const phaseId = `command.${step.label}`;
         onPhase?.({
           type: 'started',
           phase: phaseId,
-          label: this.startedLabelFor(cmd, parsed),
+          label: this.startedLabelFor(step.label, parsed),
         });
         const result = await this.fulfiller.fulfill(
-          cmd,
+          step.label,
           parsed,
           {
             correlationId: ctx.correlationId,
@@ -241,16 +243,16 @@ export class ReverseControlFlowService {
           location = result.patch.location;
         }
         if (result.value) {
-          fulfilled.push({ command: cmd, value: result.value });
+          fulfilled.push({ command: step.label, value: result.value });
         }
         onPhase?.({
           type: 'completed',
           phase: phaseId,
-          label: this.completedLabelFor(cmd, result.value),
+          label: this.completedLabelFor(step.label, result.value),
           result: { value: result.value },
         });
-        this.recordTrace(ctx, `command.${cmd}.completed`, {
-          summary: this.completedLabelFor(cmd, result.value),
+        this.recordTrace(ctx, `command.${step.label}.completed`, {
+          summary: this.completedLabelFor(step.label, result.value),
           payload: { value: result.value },
         });
       }
@@ -443,6 +445,32 @@ export class ReverseControlFlowService {
       minute: '2-digit',
     });
     return `${date}, ${time}`;
+  }
+
+  private planFulfillment(parsed: ParsedCommands): { label: CommandKind }[] {
+    const steps: { label: CommandKind }[] = [];
+    const hasPrompt = !!parsed.searchPrompt;
+
+    // LOCATION/DATE_TIME with a search_prompt → labelled search.
+    // Without a prompt → skip (already pre-injected in the meta-section).
+    if (parsed.commands.has('LOCATION') && hasPrompt) {
+      steps.push({ label: 'LOCATION' });
+    }
+    if (parsed.commands.has('DATE_TIME') && hasPrompt) {
+      steps.push({ label: 'DATE_TIME' });
+    }
+    if (parsed.commands.has('SEARCH')) {
+      steps.push({ label: 'SEARCH' });
+    } else if (
+      hasPrompt &&
+      !parsed.commands.has('LOCATION') &&
+      !parsed.commands.has('DATE_TIME')
+    ) {
+      // Bare [search_prompt="..."] without an accompanying command label
+      // — treat as SEARCH so the prompt isn't lost.
+      steps.push({ label: 'SEARCH' });
+    }
+    return steps;
   }
 
   private renderFulfilledBlock(fulfilled: FulfilledLine[]): string | null {

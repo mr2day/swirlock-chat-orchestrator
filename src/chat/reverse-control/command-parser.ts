@@ -33,8 +33,12 @@ export interface ParsedCommands {
   searchPrompt?: string;
 }
 
-const COMMAND_RE = /\[command\s*=\s*"([^"]*)"\s*\]/giu;
-const SEARCH_PROMPT_RE = /\[search_prompt\s*=\s*"([^"]*)"\s*\]/iu;
+// Tolerant: match `[command="..."` regardless of what follows (so both
+// `[command="SEARCH"]` and `[command="LOCATION", search_prompt="..."]`
+// — inline-attribute form — are picked up). `[search_prompt="..."]`
+// is matched the same way.
+const COMMAND_RE = /\[command\s*=\s*"([^"]*)"/giu;
+const SEARCH_PROMPT_RE = /\[search_prompt\s*=\s*"([^"]*)"/iu;
 
 export function parseCommands(text: string): ParsedCommands {
   const commands = new Set<CommandKind>();
