@@ -72,11 +72,16 @@ export interface LlmStreamResult {
   text: string;
 }
 
+export interface LlmModelInfo {
+  modelId: string;
+  thinkingSupported: boolean;
+}
+
 @Injectable()
 export class LlmHostService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(LlmHostService.name);
   private client?: PersistentModelHostSocket;
-  private cachedModelId: string | null = null;
+  private cachedModelInfo: LlmModelInfo | null = null;
 
   constructor(@Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig) {}
 
@@ -88,23 +93,29 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
           `Vanamonde LLM Host persistent socket unavailable at startup (${this.cfg.llmHost.baseUrl}): ${err.message}`,
         );
       });
-    void this.getModelId().catch((err: Error) => {
-      this.log.warn(`Could not fetch LLM model id at startup: ${err.message}`);
+    void this.getModelInfo().catch((err: Error) => {
+      this.log.warn(`Could not fetch LLM model info at startup: ${err.message}`);
     });
   }
 
-  /**
-   * Returns the LLM model identifier (e.g. `gemma3:12b`) reported by the
-   * Vanamonde LLM Host. The orchestrator passes this value through to
-   * client apps unchanged so they can interpolate it into persona
-   * system prompts. Cached after the first successful fetch.
-   */
   async getModelId(): Promise<string> {
-    if (this.cachedModelId) return this.cachedModelId;
+    return (await this.getModelInfo()).modelId;
+  }
+
+  /**
+   * Returns the LLM model identity + capability flags reported by the
+   * Vanamonde LLM Host (`model.status`). The orchestrator passes these
+   * values through to client apps unchanged so the UI can render
+   * model-dependent affordances (e.g. hide the "Force thinking"
+   * checkbox when the configured model does not support thinking).
+   * Cached after the first successful fetch.
+   */
+  async getModelInfo(): Promise<LlmModelInfo> {
+    if (this.cachedModelInfo) return this.cachedModelInfo;
     const baseUrl = this.cfg.llmHost.baseUrl.replace(/\/$/, '');
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/v5/model';
     const correlationId = randomUUID();
-    const id = await new Promise<string>((resolve, reject) => {
+    const info = await new Promise<LlmModelInfo>((resolve, reject) => {
       const ws = new WebSocket(wsUrl);
       const timer = setTimeout(() => {
         try {
@@ -131,15 +142,20 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
             reject(new Error(env.error?.message ?? 'model.status failed'));
             return;
           }
+          if (!isRecord(env.payload)) {
+            reject(new Error('model.status returned no payload'));
+            return;
+          }
           const modelId =
-            isRecord(env.payload) && typeof env.payload.modelId === 'string'
-              ? env.payload.modelId
-              : '';
+            typeof env.payload.modelId === 'string' ? env.payload.modelId : '';
           if (!modelId) {
             reject(new Error('model.status returned no modelId'));
             return;
           }
-          resolve(modelId);
+          const runtime = isRecord(env.payload.runtime) ? env.payload.runtime : null;
+          const thinkingSupported =
+            runtime !== null && runtime.thinkingEnabled === true;
+          resolve({ modelId, thinkingSupported });
         } catch (err) {
           clearTimeout(timer);
           reject(err instanceof Error ? err : new Error(String(err)));
@@ -150,9 +166,11 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
         reject(err);
       });
     });
-    this.cachedModelId = id;
-    this.log.log(`LLM model id resolved: ${id}`);
-    return id;
+    this.cachedModelInfo = info;
+    this.log.log(
+      `LLM model resolved: ${info.modelId} (thinkingSupported=${info.thinkingSupported})`,
+    );
+    return info;
   }
 
   onModuleDestroy(): void {

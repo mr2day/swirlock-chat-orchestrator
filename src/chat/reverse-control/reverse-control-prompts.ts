@@ -58,7 +58,9 @@ const ASSESSMENT_COMMAND_RULES = [
   '',
   'You can chain commands like this: [command="THINKING, SEARCH"][search_prompt="..."]. The software controller will build a prompt for you with the result of these commands.',
   '',
-  'For any factual lookup (biographies, filmographies, lists of works, statistics, dates, who-is/what-is questions, current events), use [command="SEARCH"]. Do not rely on memorized facts; they are often wrong or outdated.',
+  'For factual lookups about the EXTERNAL world (biographies, filmographies, lists of works, statistics, dates, current events, places, products), use [command="SEARCH"]. Do not rely on memorized facts; they are often wrong or outdated.',
+  '',
+  'Do NOT use [command="SEARCH"] for questions about yourself, your nature, your gender, your name, your capabilities, your opinions, your preferences, your feelings, or anything else introspective. Answers to those come from your own identity (the system message), not the web. Use [command="DIRECT"] for those.',
   '',
   'Wrap your response in meta-section tags, like this: [__meta_section__][command="SEARCH"][search_prompt="..."][/__meta_section__]. Do not write the user-visible answer in this round; only the command tags.',
 ].join('\n');

@@ -203,11 +203,11 @@ export class ChatStreamHandler {
 
     if (envelope.type === 'model.status') {
       try {
-        const modelId = await this.llm.getModelId();
+        const info = await this.llm.getModelInfo();
         this.send(ws, {
           type: 'model.status',
           correlationId: envelope.correlationId,
-          payload: { modelId },
+          payload: info,
         });
       } catch (err) {
         this.sendError(
