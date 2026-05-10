@@ -54,7 +54,7 @@ const env = {
     callerService: 'chat-orchestrator',
     timeoutMs: 90000,
     freshness: 'medium',
-    allowedModes: ['local_rag', 'live_web'],
+    allowedModes: ['live_web'],
     maxEvidenceChunks: 8,
   },
 
