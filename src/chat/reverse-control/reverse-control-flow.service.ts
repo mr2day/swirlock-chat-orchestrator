@@ -37,6 +37,7 @@ import { CommandFulfillerService } from './command-fulfiller.service';
 import {
   buildAnswerPrompt,
   buildAssessmentPrompt,
+  type HistoryTurn,
 } from './reverse-control-prompts';
 
 const RECENT_HISTORY_LIMIT = 12;
@@ -282,7 +283,7 @@ export class ReverseControlFlowService {
         cityCountry: finalCityCountry,
         dateTime,
         fulfilledContext: this.renderFulfilledBlock(fulfilled),
-        recentHistoryBlock: this.renderHistoryBlock(ctx.history),
+        history: this.toHistoryTurns(ctx.history),
         personaSystemPrompt: ctx.personaSystemPrompt,
       });
 
@@ -481,6 +482,13 @@ export class ReverseControlFlowService {
   private renderFulfilledBlock(fulfilled: FulfilledLine[]): string | null {
     if (fulfilled.length === 0) return null;
     return fulfilled.map((f) => `- ${f.command}: ${f.value}`).join('\n');
+  }
+
+  private toHistoryTurns(history: ConversationMessage[]): HistoryTurn[] {
+    return history
+      .slice(-RECENT_HISTORY_LIMIT)
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
   }
 
   private renderHistoryBlock(history: ConversationMessage[]): string | null {

@@ -1,5 +1,10 @@
 import type { LlmMessage } from '../../llm-host/llm-host.service';
 
+export interface HistoryTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 /**
  * Prompts for the reverse-control flow (Nick's commands format).
  *
@@ -117,46 +122,50 @@ export function buildAssessmentPrompt(args: {
   ];
 }
 
+/**
+ * Builds the answer-round prompt as a *natural* chat exchange:
+ * - system: persona + per-turn context + cross-cutting rules
+ * - user/assistant: real conversation history, role-tagged
+ * - user: the current query (with any per-turn tool/search results
+ *   inlined as a brief preamble)
+ *
+ * Deliberately avoids the `[__meta_section__]` / `[__user_query__]`
+ * framing used in the assessment round. That framing makes the model
+ * behave like a developer-tools assistant (terse, neutral) instead of
+ * a conversational persona. The assessment round still uses it because
+ * we need the model to emit `[command="..."]` tags there.
+ */
 export function buildAnswerPrompt(args: {
   userText: string;
   cityCountry: string | null;
   dateTime: string;
   fulfilledContext: string | null;
-  recentHistoryBlock: string | null;
+  history: HistoryTurn[];
   personaSystemPrompt: string | null;
 }): LlmMessage[] {
-  const systemContent = buildSystemMessage({
-    personaSystemPrompt: args.personaSystemPrompt,
-    extraRules: [PUBLIC_INFO_RULE, COMPLETE_LIST_RULE],
-  });
-
-  const userParts: string[] = [
-    '[__meta_section__]',
-    userContextLine(args),
-    '',
-    'This is a meta-section part of the conversation which is invisible to the user.',
-  ];
-
-  if (args.fulfilledContext) {
-    userParts.push('', 'Information gathered for this turn:', args.fulfilledContext);
-  }
-
-  if (args.recentHistoryBlock) {
-    userParts.push('', 'Recent conversation:', args.recentHistoryBlock);
-  }
-
-  userParts.push(
-    '',
-    'Now write your reply to the user. Reply in plain text. Do not include meta-section tags, command tags, or bot-answer tags in your reply — write only the user-visible text.',
-    '[/__meta_section__]',
-    '',
-    '[__user_query__]',
-    args.userText,
-    '[/__user_query__]',
+  const systemParts: string[] = [];
+  if (args.personaSystemPrompt) systemParts.push(args.personaSystemPrompt);
+  systemParts.push(
+    args.cityCountry
+      ? `It is ${args.dateTime}. The user is in ${args.cityCountry}.`
+      : `It is ${args.dateTime}.`,
   );
+  systemParts.push(PUBLIC_INFO_RULE);
+  systemParts.push(COMPLETE_LIST_RULE);
+  systemParts.push(LANGUAGE_RULE);
 
-  return [
-    { role: 'system', content: systemContent },
-    { role: 'user', content: userParts.join('\n') },
+  const messages: LlmMessage[] = [
+    { role: 'system', content: systemParts.join('\n\n') },
   ];
+
+  for (const turn of args.history) {
+    messages.push({ role: turn.role, content: turn.content });
+  }
+
+  const currentContent = args.fulfilledContext
+    ? `(Information gathered for this turn:\n${args.fulfilledContext}\n)\n\n${args.userText}`
+    : args.userText;
+  messages.push({ role: 'user', content: currentContent });
+
+  return messages;
 }
