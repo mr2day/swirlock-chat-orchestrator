@@ -290,7 +290,7 @@ export class ReverseControlFlowService {
       });
 
       const finalCap = this.capping.forFinalAnswer({ messages: answerMessages });
-      const finalOllama: Record<string, unknown> = { temperature: 2 };
+      const finalOllama: Record<string, unknown> = { temperature: 0 };
       if (finalCap !== undefined) finalOllama.num_predict = finalCap;
 
       const finalResult = await this.llm.streamInfer({
