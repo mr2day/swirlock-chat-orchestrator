@@ -30,7 +30,7 @@ const env = {
   //   with that `aud`, and the orchestrator rejects tokens for any other
   //   audience.
   auth: {
-    idpIssuer: 'http://127.0.0.1:3300/oidc',
+    idpIssuer: 'https://idpbase.swirlock.com/oidc',
     audience: 'http://127.0.0.1:3200',
   },
 

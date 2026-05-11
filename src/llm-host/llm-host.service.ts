@@ -81,7 +81,6 @@ export interface LlmModelInfo {
 export class LlmHostService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(LlmHostService.name);
   private client?: PersistentModelHostSocket;
-  private cachedModelInfo: LlmModelInfo | null = null;
 
   constructor(@Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig) {}
 
@@ -108,10 +107,10 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
    * values through to client apps unchanged so the UI can render
    * model-dependent affordances (e.g. hide the "Force thinking"
    * checkbox when the configured model does not support thinking).
-   * Cached after the first successful fetch.
+   * Always proxies live to the LLM Host so model swaps there are
+   * visible without an orchestrator restart.
    */
   async getModelInfo(): Promise<LlmModelInfo> {
-    if (this.cachedModelInfo) return this.cachedModelInfo;
     const baseUrl = this.cfg.llmHost.baseUrl.replace(/\/$/, '');
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/v5/model';
     const correlationId = randomUUID();
@@ -166,7 +165,6 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
         reject(err);
       });
     });
-    this.cachedModelInfo = info;
     this.log.log(
       `LLM model resolved: ${info.modelId} (thinkingSupported=${info.thinkingSupported})`,
     );
