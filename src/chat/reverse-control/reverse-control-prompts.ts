@@ -36,40 +36,6 @@ function userContextLine(args: {
   return `The user's location is currently unknown. Their dateTime is ${args.dateTime}.`;
 }
 
-/**
- * Detects the language of the user's last message so we can inject a
- * directive in that language at the top of the system message. The
- * directive then carries far more weight with the model than an English
- * "reply in user's language" sentence buried in a wall of English rules.
- *
- * Heuristic only — no library. Falls back to English when unsure.
- * Covers the languages this product actually serves today; add more
- * branches when needed.
- */
-function detectUserLanguage(text: string): 'ro' | 'es' | 'fr' | 'de' | 'it' | 'en' {
-  if (/[ăâîșțĂÂÎȘȚ]/.test(text)) return 'ro';
-  const t = ' ' + text.toLowerCase() + ' ';
-  if (
-    /\b(este|sunt|asta|astea|cum|cine|cand|unde|ce|si|nu|in|cu|din|pentru|fara|despre|mai|are|sa|pe|la|lui|ei|cauta|tu|noi|voi|imi|iti|salut|buna|multumesc|insurat|cunoscut|meserie|ocupa|romana)\b/.test(t)
-  )
-    return 'ro';
-  if (/[ñ¿¡]/.test(text) || / (el|la|los|las|qué|cómo|por|para|con|sobre|gracias|hola) /.test(t))
-    return 'es';
-  if (/[œ]/.test(text) || / (le|la|les|qu['']est|comment|pour|avec|sans|bonjour|merci) /.test(t))
-    return 'fr';
-  if (/ß/.test(text) || / (der|die|das|und|nicht|ist|sind|hallo|danke) /.test(t)) return 'de';
-  if (/ (è|sono|che|cosa|come|grazie|ciao) /.test(t)) return 'it';
-  return 'en';
-}
-
-const REPLY_LANGUAGE_DIRECTIVES: Record<ReturnType<typeof detectUserLanguage>, string> = {
-  ro: 'Răspunde în limba română. Folosește limba română pentru întregul răspuns.',
-  es: 'Responde en español. Usa el español para toda tu respuesta.',
-  fr: 'Réponds en français. Utilise le français pour toute ta réponse.',
-  de: 'Antworte auf Deutsch. Verwende für deine gesamte Antwort Deutsch.',
-  it: "Rispondi in italiano. Usa l'italiano per tutta la tua risposta.",
-  en: 'Reply in English. Use English for the entire response.',
-};
 
 const LANGUAGE_RULE =
   "Reply in the exact language of the user's last query. If the user " +
@@ -126,6 +92,8 @@ const ASSESSMENT_COMMAND_RULES = [
   'Do NOT use [command="SEARCH"] for questions about yourself, your nature, your gender, your name, your capabilities, your opinions, your preferences, your feelings, or anything else introspective. Answers to those come from your own identity (the system message), not the web. Use [command="DIRECT"] for those.',
   '',
   'Wrap your response in meta-section tags, like this: [__meta_section__][command="SEARCH"][search_prompt="..."][/__meta_section__]. Do not write the user-visible answer in this round; only the command tags.',
+  '',
+  'Also emit a [language_directive="..."] tag IN THE SAME META-SECTION. The value is one short sentence written in the language of the user\'s last message, telling the assistant to reply in that language. For Romanian: [language_directive="Răspunde în limba română."]. For Polish: [language_directive="Odpowiedz po polsku."]. For Japanese: [language_directive="日本語で答えてください。"]. For English: [language_directive="Reply in English."]. Emit this tag every time, in whatever language the user just used — no exceptions.',
 ].join('\n');
 
 function buildSystemMessage(args: {
@@ -200,6 +168,14 @@ export function buildAnswerPrompt(args: {
   fulfilledContext: string | null;
   history: HistoryTurn[];
   personaSystemPrompt: string | null;
+  /**
+   * One-sentence directive emitted by the assessment-round LLM telling
+   * the model to reply in the user's language. Written in that language.
+   * Optional — falls back to no directive if the assessment did not
+   * produce one, in which case the model relies on naturally tracking
+   * the last user message's language.
+   */
+  languageDirective: string | null;
 }): LlmMessage[] {
   // For chitchat turns, system = persona only. Anything more — even a
   // single "always reply in the user's language" line — primes the
@@ -211,12 +187,12 @@ export function buildAnswerPrompt(args: {
   // already in fact-summarising mode for those turns, so the extra
   // discipline doesn't cost personality.
   const systemParts: string[] = [];
-  // Language directive in the user's own language goes FIRST. Trailing
-  // English instructions buried in a wall of rules are reliably ignored;
-  // a short Romanian (or whatever the user used) directive at position
-  // 1 reliably wins.
-  const userLang = detectUserLanguage(args.userText);
-  systemParts.push(REPLY_LANGUAGE_DIRECTIVES[userLang]);
+  // Language directive in the user's own language goes FIRST. The
+  // assessment-round LLM emits this directive in whatever language the
+  // user just wrote — Romanian, Polish, Japanese, Hungarian — without
+  // any hardcoded list. A short native-language directive at position 1
+  // reliably outweighs the English instructions that follow.
+  if (args.languageDirective) systemParts.push(args.languageDirective);
   if (args.personaSystemPrompt) systemParts.push(args.personaSystemPrompt);
   if (args.fulfilledContext) {
     systemParts.push(SOURCE_GROUNDING_RULE);

@@ -31,14 +31,20 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set([
 export interface ParsedCommands {
   commands: Set<CommandKind>;
   searchPrompt?: string;
+  /**
+   * One-sentence directive in the user's language telling the model to
+   * reply in that language. Emitted by the assessment-round LLM as
+   * `[language_directive="..."]`. The orchestrator passes it through to
+   * the answer round and prepends it to the system message. Using the
+   * LLM as the language oracle (instead of a hardcoded list) means
+   * Polish, Japanese, Hungarian — anything — work without code changes.
+   */
+  languageDirective?: string;
 }
 
-// Tolerant: match `[command="..."` regardless of what follows (so both
-// `[command="SEARCH"]` and `[command="LOCATION", search_prompt="..."]`
-// — inline-attribute form — are picked up). `[search_prompt="..."]`
-// is matched the same way.
 const COMMAND_RE = /\[command\s*=\s*"([^"]*)"/giu;
 const SEARCH_PROMPT_RE = /\[search_prompt\s*=\s*"([^"]*)"/iu;
+const LANGUAGE_DIRECTIVE_RE = /\[language_directive\s*=\s*"([^"]*)"/iu;
 
 export function parseCommands(text: string): ParsedCommands {
   const commands = new Set<CommandKind>();
@@ -53,6 +59,9 @@ export function parseCommands(text: string): ParsedCommands {
     }
   }
   const sp = SEARCH_PROMPT_RE.exec(text);
-  const searchPrompt = sp && sp[1].trim() ? sp[1].trim() : undefined;
-  return searchPrompt ? { commands, searchPrompt } : { commands };
+  const ld = LANGUAGE_DIRECTIVE_RE.exec(text);
+  const out: ParsedCommands = { commands };
+  if (sp && sp[1].trim()) out.searchPrompt = sp[1].trim();
+  if (ld && ld[1].trim()) out.languageDirective = ld[1].trim();
+  return out;
 }
