@@ -59,8 +59,6 @@ const SOURCE_GROUNDING_RULE = [
   '- Names: people with the same first name are NOT the same person. If a source talks about someone whose full name does not match the entity the user is asking about, the source is about a different person — ignore it. Never claim that someone "is also known as" a different surname unless a source explicitly states the alias.',
   '- If none of the sources actually address the user\'s question, say so honestly. Tell the user the search results were not about the topic, instead of fabricating an answer from unrelated material.',
   '- Do not stitch unrelated sources into a single narrative. Each fact must trace back to a source that is genuinely on-topic.',
-  '',
-  'Write the answer in a warm, conversational tone — like you are telling a friend who just asked you, not reading a report. Stay strictly factual, but be human about it.',
 ].join('\n');
 
 const PUBLIC_INFO_RULE =
