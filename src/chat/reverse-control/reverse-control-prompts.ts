@@ -72,6 +72,18 @@ const COMPLETE_LIST_RULE =
   'not enough to compile a complete list, say so explicitly instead of ' +
   'silently truncating.';
 
+/**
+ * Pro-elaboration rule (opposite intent of SOURCE_GROUNDING_RULE).
+ * Tells the model to use the surrounding context the sources provide,
+ * not just the minimum needed to answer the literal question. Applied
+ * only on turns with fulfilled context.
+ */
+const ELABORATION_RULE = [
+  'When the search results contain related context, background, or supporting facts beyond the literal question, include them.',
+  'A yes/no question with a rich source set deserves a full answer — share what is relevant in the sources, not just the minimum needed to answer literally.',
+  'Use the names, dates, places, and connected details the sources mention, even if they go beyond the strict scope of the question — as long as those details are actually in the sources.',
+].join('\n');
+
 const ASSESSMENT_COMMAND_RULES = [
   'This is where you give commands to the software controller. Available commands:',
   '',
@@ -175,12 +187,18 @@ export function buildAnswerPrompt(args: {
   const systemParts: string[] = [];
   if (args.personaSystemPrompt) systemParts.push(args.personaSystemPrompt);
   if (args.fulfilledContext) {
-    systemParts.push(SOURCE_GROUNDING_RULE);
-    // The grounding rule is in English; without an explicit language
-    // directive the model drifts into English even when the user query
-    // and the sources are in another language (e.g. user asked in
-    // Romanian, got Romanian sources, model still answered in English).
+    // LANGUAGE_RULE goes BEFORE ELABORATION_RULE. Empirically, gemma4:e4b
+    // drifted into Spanish on an English query when ELABORATION_RULE came
+    // first — small models tend to weight the first system-message rule
+    // most heavily, so the language directive needs the top slot.
     systemParts.push(LANGUAGE_RULE);
+    // SOURCE_GROUNDING_RULE was disabled because its anti-stitching /
+    // minimum-needed phrasing made the model answer yes/no questions
+    // with one sentence even when the sources had rich surrounding
+    // context to draw on. ELABORATION_RULE is the opposite directive:
+    // use what's in the sources, including related context beyond the
+    // literal question.
+    systemParts.push(ELABORATION_RULE);
   }
   const messages: LlmMessage[] = [];
   if (systemParts.length > 0) {
