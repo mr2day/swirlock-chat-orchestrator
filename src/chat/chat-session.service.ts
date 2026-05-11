@@ -13,7 +13,8 @@ interface SessionRow {
   id: string;
   user_id: string;
   app_id: string;
-  persona_id: string | null;
+  persona_name: string | null;
+  persona_system_prompt: string | null;
   channel: string | null;
   client_version: string | null;
   status: string;
@@ -69,7 +70,8 @@ export interface AppendedTurn {
 export interface LoadedSession {
   id: string;
   userId: string;
-  personaId: string | null;
+  personaName: string | null;
+  personaSystemPrompt: string | null;
 }
 
 /**
@@ -98,14 +100,15 @@ export class ChatSessionService {
     this.db.connection
       .prepare(
         `INSERT INTO sessions
-           (id, user_id, app_id, persona_id, channel, client_version, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+           (id, user_id, app_id, persona_name, persona_system_prompt, channel, client_version, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
       )
       .run(
         sessionId,
         dto.participant.userId,
         dto.app.appId,
-        dto.app.personaId ?? null,
+        dto.persona?.name ?? null,
+        dto.persona?.systemPrompt ?? null,
         dto.client?.channel ?? null,
         dto.client?.clientVersion ?? null,
         now,
@@ -163,7 +166,8 @@ export class ChatSessionService {
     return {
       id: row.id,
       userId: row.user_id,
-      personaId: row.persona_id,
+      personaName: row.persona_name,
+      personaSystemPrompt: row.persona_system_prompt,
     };
   }
 

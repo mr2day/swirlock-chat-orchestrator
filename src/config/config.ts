@@ -1,9 +1,10 @@
 import * as path from 'path';
 
-export interface DevUserConfig {
-  userId: string;
-  displayName: string;
-  bearerToken: string;
+export interface AuthConfig {
+  /** OpenID Connect issuer URL of the Swirlock IdP. */
+  idpIssuer: string;
+  /** This service's own resource indicator. JWT `aud` must match. */
+  audience: string;
 }
 
 export interface DatabaseConfig {
@@ -43,7 +44,7 @@ export interface ServiceConfig {
   serviceName: string;
   host: string;
   port: number;
-  devUser: DevUserConfig;
+  auth: AuthConfig;
   database: DatabaseConfig;
   llmHost: LlmHostConfig;
   rag: RagConfig;
@@ -70,8 +71,8 @@ function validate(c: ServiceConfig): void {
   must(c.host, 'host required');
   must(c.serviceName, 'serviceName required');
   must(typeof c.port === 'number' && c.port > 0, 'port required');
-  must(c.devUser?.userId, 'devUser.userId required');
-  must(c.devUser?.bearerToken, 'devUser.bearerToken required');
+  must(c.auth?.idpIssuer, 'auth.idpIssuer required');
+  must(c.auth?.audience, 'auth.audience required');
   must(c.database?.file, 'database.file required');
   must(c.llmHost?.baseUrl, 'llmHost.baseUrl required');
   must(c.llmHost?.callerService, 'llmHost.callerService required');

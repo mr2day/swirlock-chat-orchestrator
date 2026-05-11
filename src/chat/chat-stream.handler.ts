@@ -8,12 +8,13 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import WebSocket from 'ws';
 import { FragmenterClientService } from '../fragmenter/fragmenter-client.service';
+import { LlmHostService } from '../llm-host/llm-host.service';
 import type { UserLocation } from '../rag/rag.service';
 import { ChatSessionService } from './chat-session.service';
 import {
-  ConversationFlowService,
+  ReverseControlFlowService,
   type TurnDoneEnvelope,
-} from './conversation/conversation-flow.service';
+} from './reverse-control/reverse-control-flow.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { SubmitTurnDto } from './dto/submit-turn.dto';
 
@@ -67,7 +68,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *   per WS, per the contract)
  * - the per-correlation `turn.location_required` mailbox
  * - dispatch to ChatSessionService for session.* messages and to
- *   ConversationFlowService for turn.submit
+ *   ReverseControlFlowService for turn.submit
  *
  * Does not own:
  * - any prompt construction (lives in `*-prompt-builder.service.ts`)
@@ -80,8 +81,9 @@ export class ChatStreamHandler {
 
   constructor(
     private readonly sessions: ChatSessionService,
-    private readonly conversation: ConversationFlowService,
+    private readonly flow: ReverseControlFlowService,
     private readonly fragmenter: FragmenterClientService,
+    private readonly llm: LlmHostService,
   ) {}
 
   async handle(ws: WebSocket, ctx: ConnectionContext): Promise<void> {
@@ -199,6 +201,25 @@ export class ChatStreamHandler {
       return;
     }
 
+    if (envelope.type === 'model.status') {
+      try {
+        const info = await this.llm.getModelInfo();
+        this.send(ws, {
+          type: 'model.status',
+          correlationId: envelope.correlationId,
+          payload: info,
+        });
+      } catch (err) {
+        this.sendError(
+          ws,
+          envelope.correlationId,
+          503,
+          err instanceof Error ? err.message : 'model.status failed',
+        );
+      }
+      return;
+    }
+
     if (envelope.type === 'session.create') {
       const dto = plainToInstance(
         CreateSessionDto,
@@ -284,7 +305,7 @@ export class ChatStreamHandler {
 
     let result: TurnDoneEnvelope;
     try {
-      result = await this.conversation.runTurn({
+      result = await this.flow.runTurn({
         sessionId,
         authUserId: ctx.authUserId,
         correlationId,

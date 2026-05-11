@@ -6,6 +6,7 @@ import {
   OnModuleInit,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 import { SERVICE_CONFIG } from '../config/config';
 import type { ServiceConfig } from '../config/config';
@@ -71,6 +72,11 @@ export interface LlmStreamResult {
   text: string;
 }
 
+export interface LlmModelInfo {
+  modelId: string;
+  thinkingSupported: boolean;
+}
+
 @Injectable()
 export class LlmHostService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(LlmHostService.name);
@@ -86,6 +92,83 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
           `Vanamonde LLM Host persistent socket unavailable at startup (${this.cfg.llmHost.baseUrl}): ${err.message}`,
         );
       });
+    void this.getModelInfo().catch((err: Error) => {
+      this.log.warn(`Could not fetch LLM model info at startup: ${err.message}`);
+    });
+  }
+
+  async getModelId(): Promise<string> {
+    return (await this.getModelInfo()).modelId;
+  }
+
+  /**
+   * Returns the LLM model identity + capability flags reported by the
+   * Vanamonde LLM Host (`model.status`). The orchestrator passes these
+   * values through to client apps unchanged so the UI can render
+   * model-dependent affordances (e.g. hide the "Force thinking"
+   * checkbox when the configured model does not support thinking).
+   * Always proxies live to the LLM Host so model swaps there are
+   * visible without an orchestrator restart.
+   */
+  async getModelInfo(): Promise<LlmModelInfo> {
+    const baseUrl = this.cfg.llmHost.baseUrl.replace(/\/$/, '');
+    const wsUrl = baseUrl.replace(/^http/, 'ws') + '/v5/model';
+    const correlationId = randomUUID();
+    const info = await new Promise<LlmModelInfo>((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      const timer = setTimeout(() => {
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+        reject(new Error('model.status timeout'));
+      }, this.cfg.llmHost.timeoutMs);
+      ws.on('open', () => {
+        ws.send(JSON.stringify({ type: 'model.status', correlationId }));
+      });
+      ws.on('message', (raw) => {
+        try {
+          const env = JSON.parse(rawToString(raw)) as RawLlmEnvelope;
+          if (env.correlationId !== correlationId) return;
+          clearTimeout(timer);
+          try {
+            ws.close();
+          } catch {
+            /* ignore */
+          }
+          if (env.type === 'error') {
+            reject(new Error(env.error?.message ?? 'model.status failed'));
+            return;
+          }
+          if (!isRecord(env.payload)) {
+            reject(new Error('model.status returned no payload'));
+            return;
+          }
+          const modelId =
+            typeof env.payload.modelId === 'string' ? env.payload.modelId : '';
+          if (!modelId) {
+            reject(new Error('model.status returned no modelId'));
+            return;
+          }
+          const runtime = isRecord(env.payload.runtime) ? env.payload.runtime : null;
+          const thinkingSupported =
+            runtime !== null && runtime.thinkingEnabled === true;
+          resolve({ modelId, thinkingSupported });
+        } catch (err) {
+          clearTimeout(timer);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
+      ws.on('error', (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    this.log.log(
+      `LLM model resolved: ${info.modelId} (thinkingSupported=${info.thinkingSupported})`,
+    );
+    return info;
   }
 
   onModuleDestroy(): void {
@@ -200,6 +283,7 @@ interface PersistentInferResult {
 
 interface PendingInferRequest {
   text: string;
+  thinkingText: string;
   finishReason: 'stop' | 'length' | 'error';
   timer: NodeJS.Timeout;
   onEvent?: (event: LlmStreamEvent) => void;
@@ -210,10 +294,14 @@ interface PendingInferRequest {
 }
 
 interface RawLlmEnvelope {
-  type?: unknown;
-  correlationId?: unknown;
+  type?: string;
+  correlationId?: string;
   payload?: unknown;
   error?: { code?: string; message?: string; retryable?: boolean };
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 class PersistentModelHostSocket {
@@ -332,6 +420,7 @@ class PersistentModelHostSocket {
 
       this.pending.set(args.correlationId, {
         text: '',
+        thinkingText: '',
         finishReason: 'error',
         timer,
         onEvent: args.onEvent,
@@ -412,6 +501,32 @@ class PersistentModelHostSocket {
 
     if (evt.type === 'chunk' && evt.payload.text) {
       pending.text += evt.payload.text;
+    } else if (evt.type === 'thinking' && evt.payload.text) {
+      pending.thinkingText += evt.payload.text;
+    }
+
+    // Print one block per logical message, not per streamed token.
+    // - queued / started: rare, print as they arrive
+    // - chunk / thinking: silent during stream; printed once at done
+    // - done: print the complete response (full text + full thinking)
+    if (evt.type === 'queued' || evt.type === 'started') {
+      console.log('===== LLM EVENT =====');
+      console.log('correlationId:', correlationId);
+      console.log('type:', evt.type);
+      console.log('payload:', JSON.stringify(evt.payload));
+      console.log('=====================');
+    } else if (evt.type === 'done') {
+      console.log('===== LLM EVENT =====');
+      console.log('correlationId:', correlationId);
+      console.log('type: done');
+      console.log('payload:', JSON.stringify(evt.payload));
+      if (pending.thinkingText) {
+        console.log('--- thinking ---');
+        console.log(pending.thinkingText);
+      }
+      console.log('--- text ---');
+      console.log(pending.text);
+      console.log('=====================');
     }
 
     if (evt.type === 'done') {
@@ -544,8 +659,4 @@ class PersistentModelHostSocket {
         return null;
     }
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
