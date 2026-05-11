@@ -36,41 +36,6 @@ function userContextLine(args: {
   return `The user's location is currently unknown. Their dateTime is ${args.dateTime}.`;
 }
 
-/**
- * Detects the language of the user's last message so we can inject a
- * directive in that language at the top of the system message. The
- * directive then carries far more weight with the model than an English
- * "reply in user's language" sentence buried in a wall of English rules.
- *
- * Heuristic only — no library. Falls back to English when unsure.
- * Covers the languages this product actually serves today; add more
- * branches when needed.
- */
-function detectUserLanguage(text: string): 'ro' | 'es' | 'fr' | 'de' | 'it' | 'en' {
-  if (/[ăâîșțĂÂÎȘȚ]/.test(text)) return 'ro';
-  const t = ' ' + text.toLowerCase() + ' ';
-  if (
-    /\b(este|sunt|asta|astea|cum|cine|cand|unde|ce|si|nu|in|cu|din|pentru|fara|despre|mai|are|sa|pe|la|lui|ei|cauta|tu|noi|voi|imi|iti|salut|buna|multumesc|insurat|cunoscut|meserie|ocupa|romana)\b/.test(t)
-  )
-    return 'ro';
-  if (/[ñ¿¡]/.test(text) || / (el|la|los|las|qué|cómo|por|para|con|sobre|gracias|hola) /.test(t))
-    return 'es';
-  if (/[œ]/.test(text) || / (le|la|les|qu['']est|comment|pour|avec|sans|bonjour|merci) /.test(t))
-    return 'fr';
-  if (/ß/.test(text) || / (der|die|das|und|nicht|ist|sind|hallo|danke) /.test(t)) return 'de';
-  if (/ (è|sono|che|cosa|come|grazie|ciao) /.test(t)) return 'it';
-  return 'en';
-}
-
-const REPLY_LANGUAGE_DIRECTIVES: Record<ReturnType<typeof detectUserLanguage>, string> = {
-  ro: 'Răspunde în limba română. Folosește limba română pentru întregul răspuns.',
-  es: 'Responde en español. Usa el español para toda tu respuesta.',
-  fr: 'Réponds en français. Utilise le français pour toute ta réponse.',
-  de: 'Antworte auf Deutsch. Verwende für deine gesamte Antwort Deutsch.',
-  it: "Rispondi in italiano. Usa l'italiano per tutta la tua risposta.",
-  en: 'Reply in English. Use English for the entire response.',
-};
-
 const LANGUAGE_RULE =
   "Reply in the exact language of the user's last query. If the user " +
   'switched language on this turn, switch with them on the same turn — ' +
@@ -211,14 +176,11 @@ export function buildAnswerPrompt(args: {
   // already in fact-summarising mode for those turns, so the extra
   // discipline doesn't cost personality.
   const systemParts: string[] = [];
-  // Language directive in the user's own language goes FIRST. Trailing
-  // English instructions buried in a wall of rules are reliably ignored;
-  // a short Romanian (or whatever the user used) directive at position
-  // 1 reliably wins.
-  const userLang = detectUserLanguage(args.userText);
-  systemParts.push(REPLY_LANGUAGE_DIRECTIVES[userLang]);
   if (args.personaSystemPrompt) systemParts.push(args.personaSystemPrompt);
   if (args.fulfilledContext) {
+    // SOURCE_GROUNDING_RULE bundles its own language directive at the end
+    // (the model reads it last, right before the conversation), so we
+    // don't push LANGUAGE_RULE separately on this path anymore.
     systemParts.push(SOURCE_GROUNDING_RULE);
   }
   const messages: LlmMessage[] = [];
