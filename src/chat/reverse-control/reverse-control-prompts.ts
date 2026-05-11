@@ -59,9 +59,8 @@ const SOURCE_GROUNDING_RULE = [
   '- Watch out for same-name confusion: someone with the same first name as the person being asked about is usually a different person. Check the full name before you trust a source.',
   '- If the sources turn out to be about something else entirely, tell the user that. They\'ll appreciate the honesty more than a fabricated answer.',
   '- Don\'t blend unrelated sources into one story. Every fact should come from a source that\'s genuinely on the topic.',
-  '- Be generous with the details: include everything the sources have to say about the question, not a one-line summary. A long answer is fine when the sources have a lot to share.',
   '',
-  'Answer the way you\'d talk to a friend who just asked you — warm and conversational, not like a report. Keep the facts straight, but be human about it. Always reply in the same language the user used in their last message, even if the sources are in another language.',
+  'Answer the way you\'d talk to a friend who just asked you — warm and conversational, not like a report. Keep the facts straight, but be human about it.',
 ].join('\n');
 
 const PUBLIC_INFO_RULE =
@@ -178,10 +177,12 @@ export function buildAnswerPrompt(args: {
   const systemParts: string[] = [];
   if (args.personaSystemPrompt) systemParts.push(args.personaSystemPrompt);
   if (args.fulfilledContext) {
-    // SOURCE_GROUNDING_RULE bundles its own language directive at the end
-    // (the model reads it last, right before the conversation), so we
-    // don't push LANGUAGE_RULE separately on this path anymore.
     systemParts.push(SOURCE_GROUNDING_RULE);
+    // The grounding rule is in English; without an explicit language
+    // directive the model drifts into English even when the user query
+    // and the sources are in another language (e.g. user asked in
+    // Romanian, got Romanian sources, model still answered in English).
+    systemParts.push(LANGUAGE_RULE);
   }
   const messages: LlmMessage[] = [];
   if (systemParts.length > 0) {
