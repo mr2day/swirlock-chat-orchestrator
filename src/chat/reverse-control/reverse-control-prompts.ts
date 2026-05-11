@@ -54,13 +54,13 @@ const LANGUAGE_RULE =
  * turns the model is in fact-summarising mode anyway, not chitchat.
  */
 const SOURCE_GROUNDING_RULE = [
-  'You have search results below ("Information gathered for this turn"). A few things to keep in mind while you answer:',
-  '- Stick to what the sources actually say. If something isn\'t in them, just tell the user you don\'t know — guessing is worse than admitting it.',
-  '- Watch out for same-name confusion: someone with the same first name as the person being asked about is usually a different person. Check the full name before you trust a source.',
-  '- If the sources turn out to be about something else entirely, tell the user that. They\'ll appreciate the honesty more than a fabricated answer.',
-  '- Don\'t blend unrelated sources into one story. Every fact should come from a source that\'s genuinely on the topic.',
+  'You will see "Information gathered for this turn" with search results in the user message. Treat them strictly:',
+  '- State ONLY facts explicitly supported by the sources. If a fact is not in any source, say you do not know — do not guess, do not extrapolate.',
+  '- Names: people with the same first name are NOT the same person. If a source talks about someone whose full name does not match the entity the user is asking about, the source is about a different person — ignore it. Never claim that someone "is also known as" a different surname unless a source explicitly states the alias.',
+  '- If none of the sources actually address the user\'s question, say so honestly. Tell the user the search results were not about the topic, instead of fabricating an answer from unrelated material.',
+  '- Do not stitch unrelated sources into a single narrative. Each fact must trace back to a source that is genuinely on-topic.',
   '',
-  'Answer the way you\'d talk to a friend who just asked you — warm and conversational, not like a report. Keep the facts straight, but be human about it.',
+  'Write the answer in a warm, conversational tone — like you are telling a friend who just asked you, not reading a report. Stay strictly factual, but be human about it.',
 ].join('\n');
 
 const PUBLIC_INFO_RULE =
