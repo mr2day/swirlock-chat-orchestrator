@@ -285,7 +285,6 @@ export class ReverseControlFlowService {
         fulfilledContext: this.renderFulfilledBlock(fulfilled),
         history: this.toHistoryTurns(ctx.history),
         personaSystemPrompt: ctx.personaSystemPrompt,
-        languageDirective: parsed.languageDirective ?? null,
       });
 
       const finalCap = this.capping.forFinalAnswer({ messages: answerMessages });
