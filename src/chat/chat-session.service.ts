@@ -241,6 +241,47 @@ export class ChatSessionService {
     };
   }
 
+  /**
+   * Returns a chronologically ordered (newest first) list of the
+   * authenticated user's sessions. The `title` is derived from the
+   * first user message; sessions without any user message yet fall
+   * back to "New chat".
+   */
+  listSessions(args: { authUserId: string }): {
+    sessions: {
+      sessionId: string;
+      title: string;
+      createdAt: string;
+      updatedAt: string;
+    }[];
+  } {
+    const rows = this.db.connection
+      .prepare(
+        `SELECT
+           s.id, s.created_at, s.updated_at,
+           (SELECT m.content FROM messages m
+             WHERE m.session_id = s.id AND m.role = 'user'
+             ORDER BY m.seq ASC LIMIT 1) AS first_user_content
+         FROM sessions s
+         WHERE s.user_id = ?
+         ORDER BY s.updated_at DESC`,
+      )
+      .all(args.authUserId) as {
+      id: string;
+      created_at: string;
+      updated_at: string;
+      first_user_content: string | null;
+    }[];
+    return {
+      sessions: rows.map((r) => ({
+        sessionId: r.id,
+        title: deriveTitle(r.first_user_content),
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      })),
+    };
+  }
+
   private loadSessionRow(sessionId: string, authUserId: string): SessionRow {
     const row = this.db.connection
       .prepare(`SELECT * FROM sessions WHERE id = ?`)
@@ -268,6 +309,18 @@ export class ChatSessionService {
  * BadRequestException when no text part is present. Used by the
  * conversation flow to bridge incoming DTOs to the loop.
  */
+/**
+ * Builds a short display title from the first user message of a
+ * session. Mirrors the SPA's own `deriveTitle` so server-supplied and
+ * client-cached lists agree.
+ */
+function deriveTitle(firstUserContent: string | null): string {
+  const trimmed = (firstUserContent ?? '').trim();
+  if (!trimmed) return 'New chat';
+  const oneLine = trimmed.replace(/\s+/g, ' ');
+  return oneLine.length <= 60 ? oneLine : oneLine.slice(0, 57) + '…';
+}
+
 export function extractUserText(parts: InputPartDto[]): string {
   return parts
     .filter((p) => p.type === 'text')

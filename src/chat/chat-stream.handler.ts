@@ -238,6 +238,16 @@ export class ChatStreamHandler {
       return;
     }
 
+    if (envelope.type === 'session.list') {
+      const data = this.sessions.listSessions({ authUserId: ctx.authUserId });
+      this.send(ws, {
+        type: 'session.listed',
+        correlationId: envelope.correlationId,
+        payload: data,
+      });
+      return;
+    }
+
     if (envelope.type === 'session.get') {
       const sessionId = this.requireSessionId(envelope);
       const data = this.sessions.getSession({
