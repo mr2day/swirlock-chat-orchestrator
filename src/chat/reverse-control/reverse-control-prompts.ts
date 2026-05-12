@@ -36,6 +36,21 @@ function userContextLine(args: {
   return `The user's location is currently unknown. Their dateTime is ${args.dateTime}.`;
 }
 
+/**
+ * Compact context block injected into the answer-round system prompt
+ * so the persona model can naturally reference where/when the user is
+ * without having to be asked, and won't deny knowledge of either.
+ */
+function buildAnswerContextBlock(
+  cityCountry: string | null,
+  dateTime: string,
+): string {
+  const where = cityCountry
+    ? `The user is located in ${cityCountry}.`
+    : "The user's location is not currently known to you — don't fabricate one.";
+  return `Context you can rely on without being told:\n- ${where}\n- The current date and time for the user is ${dateTime}.\nUse these whenever they're relevant, but don't volunteer them unprompted.`;
+}
+
 const LANGUAGE_RULE =
   "Reply in the exact language of the user's last query. If the user " +
   'switched language on this turn, switch with them on the same turn — ' +
@@ -186,6 +201,11 @@ export function buildAnswerPrompt(args: {
   // discipline doesn't cost personality.
   const systemParts: string[] = [];
   if (args.personaSystemPrompt) systemParts.push(args.personaSystemPrompt);
+  // Always make the answering model aware of when/where the user is.
+  // Without this, the assessment round knew the city (it's pre-injected
+  // in the meta-section there) but the persona round didn't, so the
+  // model would deny knowledge of location/date even when we had it.
+  systemParts.push(buildAnswerContextBlock(args.cityCountry, args.dateTime));
   if (args.fulfilledContext) {
     // LANGUAGE_RULE goes BEFORE ELABORATION_RULE. Empirically, gemma4:e4b
     // drifted into Spanish on an English query when ELABORATION_RULE came
