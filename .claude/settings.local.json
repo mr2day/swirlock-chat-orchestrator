@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Bash(grep -n \"ttl\\\\|AccessToken\\\\|RefreshToken\\\\|Session\\\\b\" \"/c/Users/Nick/work/serious/Swirlock Chatbot Ecosystem/swirlock-idp-base/src/idp/oidc-provider.factory.ts\" 2>&1 | head -15 && echo \"---auth.service---\" && grep -n \"automaticSilentRenew\\\\|signinSilent\\\\|AccessTokenExpir\\\\|removeUser\\\\|isAuthenticated\\\\.set\" \"/c/Users/Nick/work/serious/Swirlock Chatbot Ecosystem/swirlock-chatbot-ui/src/app/core/services/auth.service.ts\" 2>&1 | head -15)",
+      "Read(//c/Users/Nick/work/serious/Swirlock Chatbot Ecosystem/swirlock-idp-base/src/idp/**)",
+      "Read(//c/Users/Nick/work/serious/Swirlock Chatbot Ecosystem/swirlock-chatbot-ui/src/app/core/services/**)"
     ]
   }
 }

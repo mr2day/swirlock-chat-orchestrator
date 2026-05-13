@@ -42,6 +42,19 @@ import {
 
 const RECENT_HISTORY_LIMIT = 12;
 
+/**
+ * Approximate token budget for the recent-history block we send the
+ * classifier. Capped by tokens, not message count: long assistant
+ * replies (multi-thousand-char music biographies, etc.) bloat the
+ * classifier prefill latency into multi-second territory without
+ * helping the classification decision. The classifier mainly needs
+ * enough context to resolve pronouns in the current user query;
+ * older detail is dead weight.
+ *
+ * Sized roughly around 2 recent assistant replies of typical length.
+ */
+const CLASSIFIER_HISTORY_TOKEN_BUDGET = 2000;
+
 export type PhaseEvent =
   | { type: 'started'; phase: string; label: string }
   | { type: 'token'; phase: string; text: string }
@@ -491,11 +504,41 @@ export class ReverseControlFlowService {
       .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
   }
 
+  /**
+   * Rough char-based token estimate. We're not metering tokens for
+   * billing — just sizing a prompt budget — so a heuristic beats
+   * adding a tokenizer dependency for ~10% better accuracy. ~3.5
+   * chars/token is reasonable for our English + Romanian mix and
+   * leans toward overestimation, which keeps the budget conservative.
+   */
+  private estimateTokens(text: string): number {
+    return Math.ceil(text.length / 3.5);
+  }
+
   private renderHistoryBlock(history: ConversationMessage[]): string | null {
-    const recent = history.slice(-RECENT_HISTORY_LIMIT);
-    if (recent.length === 0) return null;
-    return recent
-      .filter((m) => m.role !== 'system')
+    // Walk newest → oldest, including messages while the running
+    // token total stays under CLASSIFIER_HISTORY_TOKEN_BUDGET. The
+    // most recent message is always included even if it alone
+    // overshoots — skipping it would defeat the purpose.
+    const eligible = history.filter((m) => m.role !== 'system');
+    const picked: ConversationMessage[] = [];
+    let totalTokens = 0;
+    for (let i = eligible.length - 1; i >= 0; i--) {
+      const m = eligible[i];
+      const lineTokens = this.estimateTokens(
+        `${m.role.toUpperCase()}: ${m.content}`,
+      );
+      if (
+        picked.length > 0 &&
+        totalTokens + lineTokens > CLASSIFIER_HISTORY_TOKEN_BUDGET
+      ) {
+        break;
+      }
+      picked.unshift(m);
+      totalTokens += lineTokens;
+    }
+    if (picked.length === 0) return null;
+    return picked
       .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
       .join('\n');
   }
