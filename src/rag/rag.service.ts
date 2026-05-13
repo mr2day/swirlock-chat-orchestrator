@@ -28,9 +28,7 @@ export interface RagHint {
   text: string;
 }
 
-export type RagInputPart =
-  | { type: 'text'; text: string }
-  | { type: 'image'; imageUrl?: string; imageId?: string; mimeType?: string };
+export type RagInputPart = { type: 'text'; text: string };
 
 export interface RagEvidence {
   evidenceId: string;
