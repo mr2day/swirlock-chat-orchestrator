@@ -21,6 +21,7 @@ interface SessionRow {
   status: string;
   created_at: string;
   updated_at: string;
+  total_token_count: number;
 }
 
 interface MessageRow {
@@ -73,6 +74,16 @@ export interface LoadedSession {
   userId: string;
   personaName: string | null;
   personaSystemPrompt: string | null;
+  /**
+   * Running estimate of the session's persisted user+assistant
+   * content in tokens, bumped on each appendTurn. Used by the
+   * prompt-budget fast path: when mandatory + this fits the budget,
+   * we know every message rides raw without iterating per-message
+   * token costs. May be 0 for sessions created before the Unit J
+   * migration — in that case the caller falls back to the slow
+   * per-message walk.
+   */
+  totalTokenCount: number;
 }
 
 /**
@@ -169,6 +180,7 @@ export class ChatSessionService {
       userId: row.user_id,
       personaName: row.persona_name,
       personaSystemPrompt: row.persona_system_prompt,
+      totalTokenCount: row.total_token_count ?? 0,
     };
   }
 

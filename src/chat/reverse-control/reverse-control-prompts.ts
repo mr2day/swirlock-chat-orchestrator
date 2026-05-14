@@ -4,6 +4,16 @@ import { estimateTokens } from '../utils/token-estimator';
 export interface HistoryTurn {
   role: 'user' | 'assistant';
   content: string;
+  /** Message seq from the orchestrator's messages table. Used by
+   *  the budget walk to ask the fragmenter for a summary that
+   *  covers exactly the dropped range. */
+  seq: number;
+}
+
+export interface SessionSummaryHit {
+  summary: string;
+  /** Seq cutoff this summary covers (1..throughSeq inclusive). */
+  throughSeq: number;
 }
 
 /**
@@ -198,7 +208,6 @@ export function buildAssessmentPrompt(args: {
  * we need the model to emit `[command="..."]` tags there.
  */
 export interface FragmentedContextInput {
-  sessionSummary: string | null;
   userIdentity: Array<{
     content: string;
     importance: 'core' | 'important' | 'incidental';
@@ -207,6 +216,19 @@ export interface FragmentedContextInput {
     content: string;
     importance: 'core' | 'important' | 'incidental';
   }>;
+  /**
+   * Returns the largest stored session summary with `through_seq`
+   * strictly less than `beforeSeq` (so the summary covers messages
+   * older than the raw hot zone — no overlap). When `beforeSeq` is
+   * null, returns the most recent summary regardless of cutoff (used
+   * as the last-resort fallback when the orchestrator needs *some*
+   * summary but doesn't have a clean hot-zone-start to bound by).
+   * Returns null when no summary exists at all.
+   *
+   * Lazy by design: the orchestrator only knows which cutoff it
+   * needs after the budget walk decides which messages stay raw.
+   */
+  fetchSummaryUpTo: (beforeSeq: number | null) => SessionSummaryHit | null;
 }
 
 export interface BuildAnswerPromptDiagnostics {
@@ -220,10 +242,14 @@ export interface BuildAnswerPromptDiagnostics {
   summaryIncluded: boolean;
   /** How many history messages were dropped (0 when everything fits raw). */
   historyDropped: number;
+  /** Through-seq of the summary actually used, or null when no summary was needed. */
+  summaryThroughSeq: number | null;
   /** Total prompt tokens after assembly. */
   totalPromptTokens: number;
   /** Budget the caller passed in. */
   promptBudgetTokens: number;
+  /** True if the total_token_count fast path skipped per-message iteration. */
+  fastPath: boolean;
 }
 
 export function buildAnswerPrompt(args: {
@@ -237,6 +263,13 @@ export function buildAnswerPrompt(args: {
   fragmentedContext?: FragmentedContextInput;
   /** Max prompt tokens — the LLM host's computed budget. */
   promptBudgetTokens: number;
+  /**
+   * Running content-token count from `sessions.total_token_count`. Used
+   * as a fast-path estimate to avoid iterating per-message tokens when
+   * the session clearly fits raw in the budget. 0 for sessions that
+   * predate the column — the slow path handles those correctly.
+   */
+  sessionTotalTokens: number;
   /** Optional diagnostics sink for logging the assembly decisions. */
   diagnostics?: (d: BuildAnswerPromptDiagnostics) => void;
 }): LlmMessage[] {
@@ -292,7 +325,7 @@ export function buildAnswerPrompt(args: {
     content: args.userText,
   };
 
-  // --- 2. Compute tokens for mandatory parts + optional summary ---
+  // --- 2. Compute tokens for mandatory parts ---
 
   const mandatoryTokens =
     mandatorySystemMessages.reduce(
@@ -300,64 +333,141 @@ export function buildAnswerPrompt(args: {
       0,
     ) + tokensForText(currentUserMessage.content);
 
-  const sessionSummary = args.fragmentedContext?.sessionSummary?.trim() ?? '';
-  const summaryMessage: LlmMessage | null = sessionSummary
-    ? {
-        role: 'system',
-        content:
-          'Summary of earlier turns in this session (older than the raw messages shown below):\n' +
-          sessionSummary,
-      }
-    : null;
-  const summaryTokens = summaryMessage
-    ? tokensForText(summaryMessage.content)
-    : 0;
+  // --- 3. Fast path: if sessions.total_token_count tells us the
+  //        history fits comfortably, skip per-message iteration. ---
 
-  // --- 3. Decide: does the whole history fit raw, or do we need the summary? ---
+  const perMessageOverheadBudget =
+    PER_MESSAGE_TOKEN_OVERHEAD * args.history.length;
 
-  const historyMessages: LlmMessage[] = args.history.map((turn) => ({
-    role: turn.role,
-    content: turn.content,
+  // Note: sessionTotalTokens is the running content-token sum kept by
+  // ChatSessionService.appendTurn. 0 means "either an empty session
+  // OR a pre-Unit-J session before the column was migrated" — for
+  // both cases the slow path below is correct.
+  const fastPathTotalEstimate =
+    args.sessionTotalTokens > 0
+      ? args.sessionTotalTokens + perMessageOverheadBudget
+      : null;
+
+  const fastPathFits =
+    fastPathTotalEstimate !== null &&
+    mandatoryTokens + fastPathTotalEstimate <= args.promptBudgetTokens;
+
+  if (fastPathFits) {
+    // Whole session fits raw, no summary required. Skip per-message
+    // tokenisation entirely — we just push messages through.
+    const messages: LlmMessage[] = [
+      ...mandatorySystemMessages,
+      ...args.history.map<LlmMessage>((turn) => ({
+        role: turn.role,
+        content: turn.content,
+      })),
+      currentUserMessage,
+    ];
+
+    if (args.diagnostics) {
+      args.diagnostics({
+        mandatoryTokens,
+        historyTokens: fastPathTotalEstimate as number,
+        summaryTokens: 0,
+        summaryIncluded: false,
+        summaryThroughSeq: null,
+        historyDropped: 0,
+        totalPromptTokens:
+          mandatoryTokens + (fastPathTotalEstimate as number),
+        promptBudgetTokens: args.promptBudgetTokens,
+        fastPath: true,
+      });
+    }
+    return messages;
+  }
+
+  // --- 4. Slow path: per-message token estimate + budget-driven walk ---
+
+  const historyWithTokens = args.history.map((turn) => ({
+    turn,
+    msg: { role: turn.role, content: turn.content } as LlmMessage,
+    tokens: tokensForText(turn.content),
   }));
-  const totalHistoryTokens = historyMessages.reduce(
-    (sum, m) => sum + tokensForText(m.content),
+  const totalHistoryTokens = historyWithTokens.reduce(
+    (sum, x) => sum + x.tokens,
     0,
   );
 
   let includedHistory: LlmMessage[];
-  let summaryIncluded: boolean;
-  let historyDropped: number;
-  let usedHistoryTokens: number;
+  let summaryIncluded = false;
+  let summaryMessage: LlmMessage | null = null;
+  let summaryTokens = 0;
+  let summaryThroughSeq: number | null = null;
+  let historyDropped = 0;
+  let usedHistoryTokens = 0;
 
   if (mandatoryTokens + totalHistoryTokens <= args.promptBudgetTokens) {
-    // Everything fits raw. No summary needed at all.
-    includedHistory = historyMessages;
-    summaryIncluded = false;
-    historyDropped = 0;
+    // Everything fits raw. No summary needed.
+    includedHistory = historyWithTokens.map((x) => x.msg);
     usedHistoryTokens = totalHistoryTokens;
   } else {
-    // Doesn't fit. Include the summary (if available) and walk
-    // newest-first up to the remaining budget.
-    const effectiveSummaryTokens = summaryMessage ? summaryTokens : 0;
-    const remainingForRaw =
-      args.promptBudgetTokens - mandatoryTokens - effectiveSummaryTokens;
-    const { kept, droppedCount, usedTokens } = walkHistoryNewestFirst(
-      historyMessages,
+    // Overflow. Walk newest-first up to a tentative budget that
+    // assumes a summary will be included (its size unknown until we
+    // know the cutoff). We over-reserve a placeholder for the
+    // summary, then refine once the fragmenter returns one.
+    const remainingForRaw = args.promptBudgetTokens - mandatoryTokens;
+    const tentative = walkHistoryNewestFirst(
+      historyWithTokens,
       remainingForRaw,
     );
-    includedHistory = kept;
-    historyDropped = droppedCount;
-    usedHistoryTokens = usedTokens;
-    summaryIncluded = summaryMessage !== null;
+
+    // The oldest message we kept raw — anything older than this must
+    // be summarised away (or simply dropped if no summary covers it).
+    const oldestKeptSeq =
+      tentative.kept.length > 0
+        ? tentative.kept[0].turn.seq
+        : null;
+
+    // Ask the fragmenter for a summary covering messages strictly
+    // older than what we kept raw. If we kept nothing raw (budget too
+    // tight), ask for the most recent summary regardless of cutoff.
+    const summaryHit =
+      args.fragmentedContext?.fetchSummaryUpTo(oldestKeptSeq) ?? null;
+
+    if (summaryHit) {
+      summaryMessage = {
+        role: 'system',
+        content:
+          `Summary of earlier turns in this session (covering messages 1..${summaryHit.throughSeq}, older than the raw messages shown below):\n` +
+          summaryHit.summary,
+      };
+      summaryTokens = tokensForText(summaryMessage.content);
+      summaryThroughSeq = summaryHit.throughSeq;
+      summaryIncluded = true;
+
+      // Re-walk with the actual summary cost reserved, AND drop any
+      // raw messages with seq <= summaryThroughSeq so the summary's
+      // coverage and the raw tail don't overlap.
+      const tighter = walkHistoryNewestFirst(
+        historyWithTokens.filter((x) => x.turn.seq > summaryHit.throughSeq),
+        args.promptBudgetTokens - mandatoryTokens - summaryTokens,
+      );
+      includedHistory = tighter.kept.map((x) => x.msg);
+      usedHistoryTokens = tighter.usedTokens;
+      historyDropped = args.history.length - tighter.kept.length;
+    } else {
+      // No summary available — keep the tentative raw walk and
+      // accept the lost old turns (the bot will have a gap in
+      // memory between the dropped messages and what it sees).
+      includedHistory = tentative.kept.map((x) => x.msg);
+      usedHistoryTokens = tentative.usedTokens;
+      historyDropped = tentative.droppedCount;
+    }
   }
 
-  // --- 4. Assemble final message list in the right order ---
+  // --- 5. Assemble final message list in the right order ---
 
   const messages: LlmMessage[] = [...mandatorySystemMessages];
   if (summaryIncluded && summaryMessage) {
-    // Summary goes between identity/rules system messages and the
-    // raw history block — the model reads it as background covering
-    // turns older than the raw block.
+    // Summary slots between identity/rules and the raw history block.
+    // The model reads it as background covering turns older than the
+    // raw block — and because we trimmed raw to seq > summaryThroughSeq,
+    // there is no overlap.
     messages.push(summaryMessage);
   }
   messages.push(...includedHistory);
@@ -373,36 +483,47 @@ export function buildAnswerPrompt(args: {
       historyTokens: usedHistoryTokens,
       summaryTokens: summaryIncluded ? summaryTokens : 0,
       summaryIncluded,
+      summaryThroughSeq,
       historyDropped,
       totalPromptTokens,
       promptBudgetTokens: args.promptBudgetTokens,
+      fastPath: false,
     });
   }
 
   return messages;
 }
 
+interface HistoryWithTokens {
+  turn: HistoryTurn;
+  msg: LlmMessage;
+  tokens: number;
+}
+
 /**
  * Walks history newest-first, accumulating messages whose total
  * estimated tokens fit within `budgetTokens`. Returns the kept
- * messages in the original (oldest-first) order so the alternating
+ * entries in the original (oldest-first) order so the alternating
  * user/assistant sequence reads naturally to the model.
+ *
+ * Operates on pre-tokenised entries to avoid re-estimating in the
+ * slow path. Returns the entries (not just messages) so the caller
+ * can correlate seqs for the per-cutoff summary lookup.
  */
 function walkHistoryNewestFirst(
-  history: LlmMessage[],
+  history: HistoryWithTokens[],
   budgetTokens: number,
-): { kept: LlmMessage[]; droppedCount: number; usedTokens: number } {
+): { kept: HistoryWithTokens[]; droppedCount: number; usedTokens: number } {
   if (budgetTokens <= 0) {
     return { kept: [], droppedCount: history.length, usedTokens: 0 };
   }
-  const reversed = [...history].reverse();
-  const kept: LlmMessage[] = [];
+  const kept: HistoryWithTokens[] = [];
   let usedTokens = 0;
-  for (const msg of reversed) {
-    const cost = tokensForText(msg.content);
-    if (usedTokens + cost > budgetTokens) break;
-    kept.push(msg);
-    usedTokens += cost;
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (usedTokens + entry.tokens > budgetTokens) break;
+    kept.push(entry);
+    usedTokens += entry.tokens;
   }
   return {
     kept: kept.reverse(),

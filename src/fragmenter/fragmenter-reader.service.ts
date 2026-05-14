@@ -8,22 +8,43 @@ export interface IdentityFact {
   importance: IdentityImportance;
 }
 
+export interface SessionSummaryHit {
+  /** The summary text. */
+  summary: string;
+  /** Seq cutoff this summary covers (1..throughSeq inclusive). */
+  throughSeq: number;
+}
+
 export interface FragmentedContext {
-  /** Rolling session summary, if any. */
-  sessionSummary: string | null;
   /** Durable facts the conversation has established about the user. */
   userIdentity: IdentityFact[];
   /** Durable facts the persona has established about itself. */
   appIdentity: IdentityFact[];
-}
-
-interface SummaryRow {
-  summary: string;
+  /**
+   * Fetches the largest stored summary whose `through_seq` is strictly
+   * less than `beforeSeq`. Returns `null` when no such summary exists.
+   *
+   * When `beforeSeq` is `null`, returns the most recent summary
+   * regardless of cutoff — used as a last-resort fallback when the
+   * orchestrator decides to include a summary but doesn't have a
+   * specific hot-zone-start to bound it by.
+   *
+   * Lazy by design: the orchestrator only knows which cutoff it needs
+   * after the budget walk decides which messages stay raw. Eager
+   * loading would either fetch the wrong summary or fetch every
+   * summary up front.
+   */
+  fetchSummaryUpTo: (beforeSeq: number | null) => SessionSummaryHit | null;
 }
 
 interface IdentityRow {
   content: string;
   importance: IdentityImportance;
+}
+
+interface SummaryRow {
+  summary: string;
+  through_seq: number;
 }
 
 /**
@@ -32,7 +53,7 @@ interface IdentityRow {
  * the fragmenter over the wire — it reads these tables directly at
  * prompt-assembly time.
  *
- * All three reads are absent-tolerant: if a table doesn't exist yet
+ * All reads are absent-tolerant: if a table doesn't exist yet
  * (fresh DB, fragmenter never ran) the reader returns empty data
  * rather than throwing.
  */
@@ -47,9 +68,10 @@ export class FragmenterReaderService {
   constructor(private readonly db: DatabaseService) {}
 
   /**
-   * Loads everything the orchestrator needs from the fragmenter for a
-   * single turn. `userId` and `personaName` may be null when the
-   * session row doesn't have them filled in.
+   * Loads identity facts eagerly and returns a per-cutoff summary
+   * fetcher. The orchestrator calls the fetcher after deciding which
+   * seq the hot zone starts at, so it gets the summary covering the
+   * cold zone with no overlap.
    */
   load(args: {
     sessionId: string;
@@ -58,23 +80,43 @@ export class FragmenterReaderService {
   }): FragmentedContext {
     this.ensureTablesChecked();
     return {
-      sessionSummary: this.loadSessionSummary(args.sessionId),
       userIdentity: args.userId ? this.loadUserIdentity(args.userId) : [],
       appIdentity: args.personaName
         ? this.loadAppIdentity(args.personaName)
         : [],
+      fetchSummaryUpTo: (beforeSeq) =>
+        this.fetchSessionSummary(args.sessionId, beforeSeq),
     };
   }
 
-  private loadSessionSummary(sessionId: string): string | null {
+  private fetchSessionSummary(
+    sessionId: string,
+    beforeSeq: number | null,
+  ): SessionSummaryHit | null {
     if (!this.hasSummary) return null;
     try {
-      const row = this.db.connection
-        .prepare(
-          `SELECT summary FROM fragmenter_session_summaries WHERE session_id = ?`,
-        )
-        .get(sessionId) as SummaryRow | undefined;
-      return row?.summary ?? null;
+      const row =
+        beforeSeq === null
+          ? (this.db.connection
+              .prepare(
+                `SELECT summary, through_seq
+                   FROM fragmenter_session_summaries
+                  WHERE session_id = ?
+                  ORDER BY through_seq DESC
+                  LIMIT 1`,
+              )
+              .get(sessionId) as SummaryRow | undefined)
+          : (this.db.connection
+              .prepare(
+                `SELECT summary, through_seq
+                   FROM fragmenter_session_summaries
+                  WHERE session_id = ? AND through_seq < ?
+                  ORDER BY through_seq DESC
+                  LIMIT 1`,
+              )
+              .get(sessionId, beforeSeq) as SummaryRow | undefined);
+      if (!row) return null;
+      return { summary: row.summary, throughSeq: row.through_seq };
     } catch (err) {
       this.log.warn(
         `fragmenter_session_summaries read failed: ${

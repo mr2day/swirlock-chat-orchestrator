@@ -69,9 +69,15 @@ export class ConversationHistoryService {
     try {
       row = this.db.connection
         .prepare(
+          // Unit K: the fragmenter now stores multiple summaries per
+          // session (one per cutoff). For this generic view, pick the
+          // most recent — callers that need a specific cutoff use
+          // FragmenterReaderService.fetchSummaryUpTo instead.
           `SELECT summary, through_seq, generated_at
              FROM fragmenter_session_summaries
-            WHERE session_id = ?`,
+            WHERE session_id = ?
+            ORDER BY through_seq DESC
+            LIMIT 1`,
         )
         .get(sessionId) as FragmenterSessionSummaryRow | undefined;
     } catch {

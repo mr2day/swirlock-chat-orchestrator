@@ -107,6 +107,8 @@ interface PreparedTurnContext {
   userId: string;
   personaName: string | null;
   personaSystemPrompt: string | null;
+  /** Cached at turn start from sessions.total_token_count for the prompt-budget fast path. */
+  sessionTotalTokens: number;
   history: ConversationMessage[];
   llmParts: LlmInputPart[];
   initialLocation: UserLocation | undefined;
@@ -315,11 +317,15 @@ export class ReverseControlFlowService {
         personaSystemPrompt: ctx.personaSystemPrompt,
         fragmentedContext,
         promptBudgetTokens: budget.promptBudgetTokens,
+        sessionTotalTokens: ctx.sessionTotalTokens,
         diagnostics: (d) => {
+          const summaryNote = d.summaryIncluded
+            ? `summary=${d.summaryTokens} (through seq ${d.summaryThroughSeq})`
+            : 'summary=skipped';
+          const pathNote = d.fastPath ? 'fast' : 'walked';
           this.log.log(
-            `[prompt] budget=${d.promptBudgetTokens} mandatory=${d.mandatoryTokens} ` +
-              `summary=${d.summaryTokens}${d.summaryIncluded ? '' : ' (skipped)'} ` +
-              `history=${d.historyTokens} (dropped ${d.historyDropped}) ` +
+            `[prompt:${pathNote}] budget=${d.promptBudgetTokens} mandatory=${d.mandatoryTokens} ` +
+              `${summaryNote} history=${d.historyTokens} (dropped ${d.historyDropped}) ` +
               `total=${d.totalPromptTokens}${budget.fallback ? ' [budget=fallback]' : ''}`,
           );
         },
@@ -462,6 +468,7 @@ export class ReverseControlFlowService {
       userId: session.userId,
       personaName: session.personaName,
       personaSystemPrompt: session.personaSystemPrompt,
+      sessionTotalTokens: session.totalTokenCount,
       history: view.messages,
       llmParts,
       initialLocation,
@@ -529,9 +536,16 @@ export class ReverseControlFlowService {
     // buildAnswerPrompt walks the full history under the
     // model's token budget; it drops oldest-first only when
     // the conversation actually overflows the budget.
+    // Unit K: seq is carried through so the budget-driven walk
+    // can ask the fragmenter for a summary covering exactly the
+    // dropped range.
     return history
       .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
+      .map((m) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+        seq: m.seq,
+      }));
   }
 
   /**
