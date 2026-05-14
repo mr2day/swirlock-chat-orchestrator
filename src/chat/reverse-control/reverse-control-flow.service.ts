@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 import { SERVICE_CONFIG } from '../../config/config';
 import type { ServiceConfig } from '../../config/config';
 import { FragmenterClientService } from '../../fragmenter/fragmenter-client.service';
+import { FragmenterReaderService } from '../../fragmenter/fragmenter-reader.service';
 import type {
   LlmInputPart,
   LlmStreamEvent,
@@ -102,6 +103,8 @@ interface PreparedTurnContext {
   correlationId: string;
   turnId: string;
   userText: string;
+  userId: string;
+  personaName: string | null;
   personaSystemPrompt: string | null;
   history: ConversationMessage[];
   llmParts: LlmInputPart[];
@@ -142,6 +145,7 @@ export class ReverseControlFlowService {
     private readonly sessions: ChatSessionService,
     private readonly history: ConversationHistoryService,
     private readonly fragmenter: FragmenterClientService,
+    private readonly fragmenterReader: FragmenterReaderService,
     private readonly geocoding: GeocodingService,
     private readonly llm: LlmHostService,
     private readonly trace: DecisionTraceService,
@@ -291,6 +295,12 @@ export class ReverseControlFlowService {
         summary: `Streaming final answer (thinking=${thinkingForAnswer}).`,
       });
 
+      const fragmentedContext = this.fragmenterReader.load({
+        sessionId: ctx.sessionId,
+        userId: ctx.userId,
+        personaName: ctx.personaName,
+      });
+
       const answerMessages = buildAnswerPrompt({
         userText: ctx.userText,
         cityCountry: finalCityCountry,
@@ -298,6 +308,7 @@ export class ReverseControlFlowService {
         fulfilledContext: this.renderFulfilledBlock(fulfilled),
         history: this.toHistoryTurns(ctx.history),
         personaSystemPrompt: ctx.personaSystemPrompt,
+        fragmentedContext,
       });
 
       const finalCap = this.capping.forFinalAnswer({ messages: answerMessages });
@@ -434,6 +445,8 @@ export class ReverseControlFlowService {
       correlationId: input.correlationId,
       turnId: randomUUID(),
       userText,
+      userId: session.userId,
+      personaName: session.personaName,
       personaSystemPrompt: session.personaSystemPrompt,
       history: view.messages,
       llmParts,

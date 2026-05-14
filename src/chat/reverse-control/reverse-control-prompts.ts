@@ -186,6 +186,18 @@ export function buildAssessmentPrompt(args: {
  * a conversational persona. The assessment round still uses it because
  * we need the model to emit `[command="..."]` tags there.
  */
+export interface FragmentedContextInput {
+  sessionSummary: string | null;
+  userIdentity: Array<{
+    content: string;
+    importance: 'core' | 'important' | 'incidental';
+  }>;
+  appIdentity: Array<{
+    content: string;
+    importance: 'core' | 'important' | 'incidental';
+  }>;
+}
+
 export function buildAnswerPrompt(args: {
   userText: string;
   cityCountry: string | null;
@@ -193,6 +205,7 @@ export function buildAnswerPrompt(args: {
   fulfilledContext: string | null;
   history: HistoryTurn[];
   personaSystemPrompt: string | null;
+  fragmentedContext?: FragmentedContextInput;
 }): LlmMessage[] {
   // For chitchat turns, system = persona only. Anything more — even a
   // single "always reply in the user's language" line — primes the
@@ -229,6 +242,16 @@ export function buildAnswerPrompt(args: {
     messages.push({ role: 'system', content: systemParts.join('\n\n') });
   }
 
+  // Fragmented context from the Context Fragmenter: rolling session
+  // summary + durable user-identity + durable persona-identity. Goes
+  // into its own system message so the model treats it as background
+  // truth rather than as something said in conversation. Empty blocks
+  // are simply omitted.
+  const fragmentedBlock = renderFragmentedContextBlock(args.fragmentedContext);
+  if (fragmentedBlock) {
+    messages.push({ role: 'system', content: fragmentedBlock });
+  }
+
   // Search/lookup results go into their OWN system message rather than
   // being stuffed into the final user turn. Two reasons: (1) the model
   // shouldn't think the user pasted 15 web articles into their question;
@@ -249,4 +272,38 @@ export function buildAnswerPrompt(args: {
   messages.push({ role: 'user', content: args.userText });
 
   return messages;
+}
+
+function renderFragmentedContextBlock(
+  ctx: FragmentedContextInput | undefined,
+): string | null {
+  if (!ctx) return null;
+  const hasSummary =
+    typeof ctx.sessionSummary === 'string' && ctx.sessionSummary.trim().length > 0;
+  const hasUser = ctx.userIdentity.length > 0;
+  const hasApp = ctx.appIdentity.length > 0;
+  if (!hasSummary && !hasUser && !hasApp) return null;
+
+  const lines: string[] = ['Background memory carried across turns:'];
+
+  if (hasSummary) {
+    lines.push('', 'Rolling summary of the conversation so far:');
+    lines.push((ctx.sessionSummary as string).trim());
+  }
+
+  if (hasUser) {
+    lines.push('', 'What you know about the user (durable facts):');
+    for (const fact of ctx.userIdentity) {
+      lines.push(`- [${fact.importance}] ${fact.content}`);
+    }
+  }
+
+  if (hasApp) {
+    lines.push('', 'What you know about yourself (durable facts):');
+    for (const fact of ctx.appIdentity) {
+      lines.push(`- [${fact.importance}] ${fact.content}`);
+    }
+  }
+
+  return lines.join('\n');
 }
