@@ -1,8 +1,19 @@
 import type { LlmMessage } from '../../llm-host/llm-host.service';
+import { estimateTokens } from '../utils/token-estimator';
 
 export interface HistoryTurn {
   role: 'user' | 'assistant';
   content: string;
+}
+
+/**
+ * Per-message token overhead the chat template adds around role
+ * markers and separators. Coarse but fine for budgeting.
+ */
+const PER_MESSAGE_TOKEN_OVERHEAD = 4;
+
+function tokensForText(text: string): number {
+  return estimateTokens(text) + PER_MESSAGE_TOKEN_OVERHEAD;
 }
 
 /**
@@ -198,14 +209,36 @@ export interface FragmentedContextInput {
   }>;
 }
 
+export interface BuildAnswerPromptDiagnostics {
+  /** Tokens used by the mandatory parts (persona + rules + identity + search + current user msg). */
+  mandatoryTokens: number;
+  /** Tokens used by raw history actually included. */
+  historyTokens: number;
+  /** Tokens used by the session summary, when included (0 otherwise). */
+  summaryTokens: number;
+  /** True if budget required dropping oldest history in favour of the summary. */
+  summaryIncluded: boolean;
+  /** How many history messages were dropped (0 when everything fits raw). */
+  historyDropped: number;
+  /** Total prompt tokens after assembly. */
+  totalPromptTokens: number;
+  /** Budget the caller passed in. */
+  promptBudgetTokens: number;
+}
+
 export function buildAnswerPrompt(args: {
   userText: string;
   cityCountry: string | null;
   dateTime: string;
   fulfilledContext: string | null;
+  /** ALL conversation history for this session, oldest-first. NOT pre-sliced. */
   history: HistoryTurn[];
   personaSystemPrompt: string | null;
   fragmentedContext?: FragmentedContextInput;
+  /** Max prompt tokens — the LLM host's computed budget. */
+  promptBudgetTokens: number;
+  /** Optional diagnostics sink for logging the assembly decisions. */
+  diagnostics?: (d: BuildAnswerPromptDiagnostics) => void;
 }): LlmMessage[] {
   // For chitchat turns, system = persona only. Anything more — even a
   // single "always reply in the user's language" line — primes the
@@ -216,80 +249,185 @@ export function buildAnswerPrompt(args: {
   // fulfilling command), persona + SOURCE_GROUNDING_RULE. The model is
   // already in fact-summarising mode for those turns, so the extra
   // discipline doesn't cost personality.
+  // --- 1. Build the always-mandatory parts as discrete system messages ---
+
   const systemParts: string[] = [];
   if (args.personaSystemPrompt) systemParts.push(args.personaSystemPrompt);
   // Always make the answering model aware of when/where the user is.
-  // Without this, the assessment round knew the city (it's pre-injected
-  // in the meta-section there) but the persona round didn't, so the
-  // model would deny knowledge of location/date even when we had it.
   systemParts.push(buildAnswerContextBlock(args.cityCountry, args.dateTime));
   if (args.fulfilledContext) {
-    // LANGUAGE_RULE goes BEFORE ELABORATION_RULE. Empirically, gemma4:e4b
-    // drifted into Spanish on an English query when ELABORATION_RULE came
-    // first — small models tend to weight the first system-message rule
-    // most heavily, so the language directive needs the top slot.
+    // LANGUAGE_RULE before ELABORATION_RULE — small models weight the
+    // first system-message rule most heavily, so the language directive
+    // needs the top slot.
     systemParts.push(LANGUAGE_RULE);
-    // SOURCE_GROUNDING_RULE was disabled because its anti-stitching /
-    // minimum-needed phrasing made the model answer yes/no questions
-    // with one sentence even when the sources had rich surrounding
-    // context to draw on. ELABORATION_RULE is the opposite directive:
-    // use what's in the sources, including related context beyond the
-    // literal question.
     systemParts.push(ELABORATION_RULE);
   }
-  const messages: LlmMessage[] = [];
+
+  const mandatorySystemMessages: LlmMessage[] = [];
   if (systemParts.length > 0) {
-    messages.push({ role: 'system', content: systemParts.join('\n\n') });
+    mandatorySystemMessages.push({
+      role: 'system',
+      content: systemParts.join('\n\n'),
+    });
   }
 
-  // Fragmented context from the Context Fragmenter: rolling session
-  // summary + durable user-identity + durable persona-identity. Goes
-  // into its own system message so the model treats it as background
-  // truth rather than as something said in conversation. Empty blocks
-  // are simply omitted.
-  const fragmentedBlock = renderFragmentedContextBlock(args.fragmentedContext);
-  if (fragmentedBlock) {
-    messages.push({ role: 'system', content: fragmentedBlock });
+  // Durable identity facts (user + persona). Always included — these
+  // are small, always relevant, and cheap to include.
+  const identityBlock = renderIdentityOnlyBlock(args.fragmentedContext);
+  if (identityBlock) {
+    mandatorySystemMessages.push({ role: 'system', content: identityBlock });
   }
 
-  // Search/lookup results go into their OWN system message rather than
-  // being stuffed into the final user turn. Two reasons: (1) the model
-  // shouldn't think the user pasted 15 web articles into their question;
-  // (2) system role signals "ground truth from the runtime", not "thing
-  // a participant said". Ollama's chat template concatenates multiple
-  // system messages into the system prefix.
+  // Search/lookup results: separate system message so the model sees
+  // them as ground-truth runtime context, not as user-pasted content.
   if (args.fulfilledContext) {
-    messages.push({
+    mandatorySystemMessages.push({
       role: 'system',
       content: `Information gathered for this turn:\n${args.fulfilledContext}`,
     });
   }
 
-  for (const turn of args.history) {
-    messages.push({ role: turn.role, content: turn.content });
+  const currentUserMessage: LlmMessage = {
+    role: 'user',
+    content: args.userText,
+  };
+
+  // --- 2. Compute tokens for mandatory parts + optional summary ---
+
+  const mandatoryTokens =
+    mandatorySystemMessages.reduce(
+      (sum, m) => sum + tokensForText(m.content),
+      0,
+    ) + tokensForText(currentUserMessage.content);
+
+  const sessionSummary = args.fragmentedContext?.sessionSummary?.trim() ?? '';
+  const summaryMessage: LlmMessage | null = sessionSummary
+    ? {
+        role: 'system',
+        content:
+          'Summary of earlier turns in this session (older than the raw messages shown below):\n' +
+          sessionSummary,
+      }
+    : null;
+  const summaryTokens = summaryMessage
+    ? tokensForText(summaryMessage.content)
+    : 0;
+
+  // --- 3. Decide: does the whole history fit raw, or do we need the summary? ---
+
+  const historyMessages: LlmMessage[] = args.history.map((turn) => ({
+    role: turn.role,
+    content: turn.content,
+  }));
+  const totalHistoryTokens = historyMessages.reduce(
+    (sum, m) => sum + tokensForText(m.content),
+    0,
+  );
+
+  let includedHistory: LlmMessage[];
+  let summaryIncluded: boolean;
+  let historyDropped: number;
+  let usedHistoryTokens: number;
+
+  if (mandatoryTokens + totalHistoryTokens <= args.promptBudgetTokens) {
+    // Everything fits raw. No summary needed at all.
+    includedHistory = historyMessages;
+    summaryIncluded = false;
+    historyDropped = 0;
+    usedHistoryTokens = totalHistoryTokens;
+  } else {
+    // Doesn't fit. Include the summary (if available) and walk
+    // newest-first up to the remaining budget.
+    const effectiveSummaryTokens = summaryMessage ? summaryTokens : 0;
+    const remainingForRaw =
+      args.promptBudgetTokens - mandatoryTokens - effectiveSummaryTokens;
+    const { kept, droppedCount, usedTokens } = walkHistoryNewestFirst(
+      historyMessages,
+      remainingForRaw,
+    );
+    includedHistory = kept;
+    historyDropped = droppedCount;
+    usedHistoryTokens = usedTokens;
+    summaryIncluded = summaryMessage !== null;
   }
 
-  messages.push({ role: 'user', content: args.userText });
+  // --- 4. Assemble final message list in the right order ---
+
+  const messages: LlmMessage[] = [...mandatorySystemMessages];
+  if (summaryIncluded && summaryMessage) {
+    // Summary goes between identity/rules system messages and the
+    // raw history block — the model reads it as background covering
+    // turns older than the raw block.
+    messages.push(summaryMessage);
+  }
+  messages.push(...includedHistory);
+  messages.push(currentUserMessage);
+
+  if (args.diagnostics) {
+    const totalPromptTokens =
+      mandatoryTokens +
+      (summaryIncluded ? summaryTokens : 0) +
+      usedHistoryTokens;
+    args.diagnostics({
+      mandatoryTokens,
+      historyTokens: usedHistoryTokens,
+      summaryTokens: summaryIncluded ? summaryTokens : 0,
+      summaryIncluded,
+      historyDropped,
+      totalPromptTokens,
+      promptBudgetTokens: args.promptBudgetTokens,
+    });
+  }
 
   return messages;
 }
 
-function renderFragmentedContextBlock(
+/**
+ * Walks history newest-first, accumulating messages whose total
+ * estimated tokens fit within `budgetTokens`. Returns the kept
+ * messages in the original (oldest-first) order so the alternating
+ * user/assistant sequence reads naturally to the model.
+ */
+function walkHistoryNewestFirst(
+  history: LlmMessage[],
+  budgetTokens: number,
+): { kept: LlmMessage[]; droppedCount: number; usedTokens: number } {
+  if (budgetTokens <= 0) {
+    return { kept: [], droppedCount: history.length, usedTokens: 0 };
+  }
+  const reversed = [...history].reverse();
+  const kept: LlmMessage[] = [];
+  let usedTokens = 0;
+  for (const msg of reversed) {
+    const cost = tokensForText(msg.content);
+    if (usedTokens + cost > budgetTokens) break;
+    kept.push(msg);
+    usedTokens += cost;
+  }
+  return {
+    kept: kept.reverse(),
+    droppedCount: history.length - kept.length,
+    usedTokens,
+  };
+}
+
+/**
+ * Renders the durable-identity portion of the fragmented context
+ * (user identity facts + persona identity facts). The session
+ * summary is intentionally NOT included here — the new prompt
+ * assembly handles the summary as a conditional, budget-driven
+ * block in its own system message, so identity and summary are
+ * decoupled.
+ */
+function renderIdentityOnlyBlock(
   ctx: FragmentedContextInput | undefined,
 ): string | null {
   if (!ctx) return null;
-  const hasSummary =
-    typeof ctx.sessionSummary === 'string' && ctx.sessionSummary.trim().length > 0;
   const hasUser = ctx.userIdentity.length > 0;
   const hasApp = ctx.appIdentity.length > 0;
-  if (!hasSummary && !hasUser && !hasApp) return null;
+  if (!hasUser && !hasApp) return null;
 
-  const lines: string[] = ['Background memory carried across turns:'];
-
-  if (hasSummary) {
-    lines.push('', 'Rolling summary of the conversation so far:');
-    lines.push((ctx.sessionSummary as string).trim());
-  }
+  const lines: string[] = ['Durable memory carried across turns:'];
 
   if (hasUser) {
     lines.push('', 'What you know about the user (durable facts):');

@@ -60,6 +60,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         ON sessions(user_id);
     `);
     this.alterSessionsForPersonaVariable();
+    this.ensureSessionsTokenCounter();
     this.connection.exec(`
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
@@ -204,6 +205,26 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         `ALTER TABLE sessions ADD COLUMN persona_system_prompt TEXT;`,
       );
     }
+  }
+
+  /**
+   * Adds `sessions.total_token_count` (INTEGER NOT NULL DEFAULT 0).
+   * Bumped on every persisted turn by ChatSessionService.appendTurn,
+   * so the orchestrator can quickly know "how big has this session
+   * grown" without iterating every message. Used by the prompt
+   * budget logic (Unit J): when the running total approaches the
+   * model's promptBudgetTokens, the assembly switches from "all raw"
+   * to "summary + as much raw as fits".
+   */
+  private ensureSessionsTokenCounter(): void {
+    const cols = this.connection
+      .prepare(`PRAGMA table_info('sessions')`)
+      .all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === 'total_token_count')) return;
+    this.connection.exec(
+      `ALTER TABLE sessions ADD COLUMN total_token_count INTEGER NOT NULL DEFAULT 0;`,
+    );
+    this.log.log('Added column sessions.total_token_count');
   }
 
   private renameLegacyAgentEvents(): void {

@@ -16,6 +16,7 @@ import type {
   LlmStreamEvent,
 } from '../../llm-host/llm-host.service';
 import { LlmHostService } from '../../llm-host/llm-host.service';
+import { PromptBudgetService } from '../../llm-host/prompt-budget.service';
 import type {
   RagEvidence,
   RetrievalStreamEvent,
@@ -148,6 +149,7 @@ export class ReverseControlFlowService {
     private readonly fragmenterReader: FragmenterReaderService,
     private readonly geocoding: GeocodingService,
     private readonly llm: LlmHostService,
+    private readonly promptBudget: PromptBudgetService,
     private readonly trace: DecisionTraceService,
     private readonly capping: CappingService,
     private readonly fulfiller: CommandFulfillerService,
@@ -301,14 +303,26 @@ export class ReverseControlFlowService {
         personaName: ctx.personaName,
       });
 
+      const budget = this.promptBudget.get();
       const answerMessages = buildAnswerPrompt({
         userText: ctx.userText,
         cityCountry: finalCityCountry,
         dateTime,
         fulfilledContext: this.renderFulfilledBlock(fulfilled),
+        // Pass the FULL history; buildAnswerPrompt will trim/summarize
+        // to fit the budget. This replaces the old slice(-12) policy.
         history: this.toHistoryTurns(ctx.history),
         personaSystemPrompt: ctx.personaSystemPrompt,
         fragmentedContext,
+        promptBudgetTokens: budget.promptBudgetTokens,
+        diagnostics: (d) => {
+          this.log.log(
+            `[prompt] budget=${d.promptBudgetTokens} mandatory=${d.mandatoryTokens} ` +
+              `summary=${d.summaryTokens}${d.summaryIncluded ? '' : ' (skipped)'} ` +
+              `history=${d.historyTokens} (dropped ${d.historyDropped}) ` +
+              `total=${d.totalPromptTokens}${budget.fallback ? ' [budget=fallback]' : ''}`,
+          );
+        },
       });
 
       const finalCap = this.capping.forFinalAnswer({ messages: answerMessages });
@@ -511,8 +525,11 @@ export class ReverseControlFlowService {
   }
 
   private toHistoryTurns(history: ConversationMessage[]): HistoryTurn[] {
+    // Unit J: no longer slice to a fixed message count.
+    // buildAnswerPrompt walks the full history under the
+    // model's token budget; it drops oldest-first only when
+    // the conversation actually overflows the budget.
     return history
-      .slice(-RECENT_HISTORY_LIMIT)
       .filter((m) => m.role === 'user' || m.role === 'assistant')
       .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
   }

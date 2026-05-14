@@ -72,9 +72,23 @@ export interface LlmStreamResult {
   text: string;
 }
 
+export interface LlmContextWindow {
+  /** Tokens Ollama is configured to load the model with. */
+  numCtx: number;
+  /** Tokens available for the prompt (numCtx × promptBudgetFraction). */
+  promptBudgetTokens: number;
+  /** Tokens reserved for the model's response. */
+  responseReserveTokens: number;
+  /** Fraction of numCtx allocated to the prompt. */
+  promptBudgetFraction: number;
+  /** True if the host had to fall back to its default (equations failed). */
+  fellBackToDefault?: boolean;
+}
+
 export interface LlmModelInfo {
   modelId: string;
   thinkingSupported: boolean;
+  contextWindow?: LlmContextWindow;
 }
 
 @Injectable()
@@ -154,7 +168,32 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
           const runtime = isRecord(env.payload.runtime) ? env.payload.runtime : null;
           const thinkingSupported =
             runtime !== null && runtime.thinkingEnabled === true;
-          resolve({ modelId, thinkingSupported });
+          const cwRaw = isRecord(env.payload.contextWindow)
+            ? env.payload.contextWindow
+            : null;
+          let contextWindow: LlmContextWindow | undefined;
+          if (
+            cwRaw !== null &&
+            typeof cwRaw.numCtx === 'number' &&
+            typeof cwRaw.promptBudgetTokens === 'number' &&
+            typeof cwRaw.responseReserveTokens === 'number' &&
+            typeof cwRaw.promptBudgetFraction === 'number'
+          ) {
+            contextWindow = {
+              numCtx: cwRaw.numCtx,
+              promptBudgetTokens: cwRaw.promptBudgetTokens,
+              responseReserveTokens: cwRaw.responseReserveTokens,
+              promptBudgetFraction: cwRaw.promptBudgetFraction,
+              ...(typeof cwRaw.fellBackToDefault === 'boolean'
+                ? { fellBackToDefault: cwRaw.fellBackToDefault }
+                : {}),
+            };
+          }
+          resolve({
+            modelId,
+            thinkingSupported,
+            ...(contextWindow ? { contextWindow } : {}),
+          });
         } catch (err) {
           clearTimeout(timer);
           reject(err instanceof Error ? err : new Error(String(err)));
@@ -166,7 +205,11 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
       });
     });
     this.log.log(
-      `LLM model resolved: ${info.modelId} (thinkingSupported=${info.thinkingSupported})`,
+      `LLM model resolved: ${info.modelId} (thinkingSupported=${info.thinkingSupported}` +
+        (info.contextWindow
+          ? `, numCtx=${info.contextWindow.numCtx}, promptBudgetTokens=${info.contextWindow.promptBudgetTokens}`
+          : ', contextWindow=unknown') +
+        ')',
     );
     return info;
   }

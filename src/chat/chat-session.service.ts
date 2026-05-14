@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import { estimateTokens } from './utils/token-estimator';
 import { DatabaseService } from '../database/database.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import type { InputPartDto } from './dto/submit-turn.dto';
@@ -226,9 +227,22 @@ export class ChatSessionService {
           createdAt,
           nextSeq++,
         );
+      // Unit J: bump the per-session token counter so the answer-round
+      // prompt assembler can decide cheaply whether the conversation
+      // still fits raw in the budget or needs the summary fallback.
+      // Uses the same 3.5-chars/token heuristic as the classifier's
+      // history budget — accurate enough for sizing, no tokenizer
+      // dependency.
+      const turnTokens =
+        estimateTokens(args.userText) + estimateTokens(args.assistantText);
       this.db.connection
-        .prepare(`UPDATE sessions SET updated_at = ? WHERE id = ?`)
-        .run(createdAt, args.sessionId);
+        .prepare(
+          `UPDATE sessions
+              SET updated_at = ?,
+                  total_token_count = total_token_count + ?
+            WHERE id = ?`,
+        )
+        .run(createdAt, turnTokens, args.sessionId);
     });
     tx();
 
