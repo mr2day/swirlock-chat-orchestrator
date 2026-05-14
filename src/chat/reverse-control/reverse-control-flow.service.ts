@@ -520,13 +520,17 @@ export class ReverseControlFlowService {
     // token total stays under CLASSIFIER_HISTORY_TOKEN_BUDGET. The
     // most recent message is always included even if it alone
     // overshoots — skipping it would defeat the purpose.
+    // Labels use "User:" / "You:" so the chatbot reading this history
+    // sees its own past responses as belonging to itself, not to some
+    // anonymous "ASSISTANT" entity.
     const eligible = history.filter((m) => m.role !== 'system');
     const picked: ConversationMessage[] = [];
     let totalTokens = 0;
     for (let i = eligible.length - 1; i >= 0; i--) {
       const m = eligible[i];
+      const label = m.role === 'user' ? 'User' : 'You';
       const lineTokens = this.estimateTokens(
-        `${m.role.toUpperCase()}: ${m.content}`,
+        `${label}: ${m.content}`,
       );
       if (
         picked.length > 0 &&
@@ -539,7 +543,7 @@ export class ReverseControlFlowService {
     }
     if (picked.length === 0) return null;
     return picked
-      .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+      .map((m) => `${m.role === 'user' ? 'User' : 'You'}: ${m.content}`)
       .join('\n');
   }
 

@@ -33,22 +33,26 @@ function userContextLine(args: {
   if (args.cityCountry) {
     return `The user is geographically located in ${args.cityCountry} and their dateTime is ${args.dateTime}.`;
   }
-  return `The user's location is currently unknown. Their dateTime is ${args.dateTime}.`;
+  return `The user's dateTime is ${args.dateTime}.`;
 }
 
 /**
  * Compact context block injected into the answer-round system prompt
  * so the persona model can naturally reference where/when the user is
- * without having to be asked, and won't deny knowledge of either.
+ * without having to be asked. When location isn't available from the
+ * frontend, the location bullet is omitted entirely — no apologetic
+ * "I don't know" line.
  */
 function buildAnswerContextBlock(
   cityCountry: string | null,
   dateTime: string,
 ): string {
-  const where = cityCountry
-    ? `The user is located in ${cityCountry}.`
-    : "The user's location is not currently known to you — don't fabricate one.";
-  return `Context you can rely on without being told:\n- ${where}\n- The current date and time for the user is ${dateTime}.\nUse these whenever they're relevant, but don't volunteer them unprompted.`;
+  const bullets: string[] = [];
+  if (cityCountry) {
+    bullets.push(`- The user is located in ${cityCountry}.`);
+  }
+  bullets.push(`- The current date and time for the user is ${dateTime}.`);
+  return `Context you can rely on without being told:\n${bullets.join('\n')}\nUse these whenever they're relevant, but don't volunteer them unprompted.`;
 }
 
 const LANGUAGE_RULE =
@@ -225,20 +229,24 @@ export function buildAnswerPrompt(args: {
     messages.push({ role: 'system', content: systemParts.join('\n\n') });
   }
 
+  // Search/lookup results go into their OWN system message rather than
+  // being stuffed into the final user turn. Two reasons: (1) the model
+  // shouldn't think the user pasted 15 web articles into their question;
+  // (2) system role signals "ground truth from the runtime", not "thing
+  // a participant said". Ollama's chat template concatenates multiple
+  // system messages into the system prefix.
+  if (args.fulfilledContext) {
+    messages.push({
+      role: 'system',
+      content: `Information gathered for this turn:\n${args.fulfilledContext}`,
+    });
+  }
+
   for (const turn of args.history) {
     messages.push({ role: turn.role, content: turn.content });
   }
 
-  const preambleParts: string[] = [];
-  if (args.fulfilledContext) {
-    preambleParts.push(
-      `(Information gathered for this turn:\n${args.fulfilledContext}\n)`,
-    );
-  }
-  const currentContent = preambleParts.length
-    ? `${preambleParts.join('\n\n')}\n\n${args.userText}`
-    : args.userText;
-  messages.push({ role: 'user', content: currentContent });
+  messages.push({ role: 'user', content: args.userText });
 
   return messages;
 }
