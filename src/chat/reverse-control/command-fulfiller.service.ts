@@ -107,7 +107,7 @@ export class CommandFulfillerService {
       const lines: string[] = [
         `Search query: "${query}" — ${result.evidence.length} result${result.evidence.length === 1 ? '' : 's'}:`,
       ];
-      for (const ev of result.evidence.slice(0, 8)) {
+      for (const ev of result.evidence.slice(0, 15)) {
         const url = ev.sourceUrl ? ` (${ev.sourceUrl})` : '';
         const snippet = ev.snippet ? `: ${ev.snippet}` : '';
         lines.push(`- ${ev.sourceTitle}${url}${snippet}`);

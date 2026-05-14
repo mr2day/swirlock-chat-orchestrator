@@ -58,7 +58,7 @@ const env = {
     timeoutMs: 90000,
     freshness: 'medium',
     allowedModes: ['live_web'],
-    maxEvidenceChunks: 8,
+    maxEvidenceChunks: 15,
   },
 
   // Context Fragmenter peer module. Per v5, the orchestrator opens
