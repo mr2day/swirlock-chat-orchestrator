@@ -21,6 +21,14 @@ export interface FragmentedContext {
   /** Durable facts the persona has established about itself. */
   appIdentity: IdentityFact[];
   /**
+   * Behavioural lessons distilled from past hallucination audits for
+   * this persona (Unit F). Rendered alongside `appIdentity` in the
+   * answer-round identity block with a `[lesson, tier]` label, and
+   * surfaced separately to the classifier round so the SEARCH/DIRECT
+   * decision is informed by mistakes the persona has already made.
+   */
+  experienceLessons: IdentityFact[];
+  /**
    * Fetches the largest stored summary whose `through_seq` is strictly
    * less than `beforeSeq`. Returns `null` when no such summary exists.
    *
@@ -64,6 +72,7 @@ export class FragmenterReaderService {
   private hasSummary = false;
   private hasUserIdentity = false;
   private hasAppIdentity = false;
+  private hasExperienceLessons = false;
 
   constructor(private readonly db: DatabaseService) {}
 
@@ -83,6 +92,9 @@ export class FragmenterReaderService {
       userIdentity: args.userId ? this.loadUserIdentity(args.userId) : [],
       appIdentity: args.personaName
         ? this.loadAppIdentity(args.personaName)
+        : [],
+      experienceLessons: args.personaName
+        ? this.loadExperienceLessons(args.personaName)
         : [],
       fetchSummaryUpTo: (beforeSeq) =>
         this.fetchSessionSummary(args.sessionId, beforeSeq),
@@ -155,6 +167,34 @@ export class FragmenterReaderService {
     }
   }
 
+  private loadExperienceLessons(personaName: string): IdentityFact[] {
+    if (!this.hasExperienceLessons) return [];
+    try {
+      const rows = this.db.connection
+        .prepare(
+          `SELECT content, importance
+             FROM fragmenter_experience_lessons
+            WHERE persona_name = ? AND superseded_at IS NULL
+            ORDER BY
+              CASE importance
+                WHEN 'core' THEN 0
+                WHEN 'important' THEN 1
+                ELSE 2
+              END,
+              generated_at ASC`,
+        )
+        .all(personaName) as IdentityRow[];
+      return rows;
+    } catch (err) {
+      this.log.warn(
+        `fragmenter_experience_lessons read failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return [];
+    }
+  }
+
   private loadAppIdentity(personaName: string): IdentityFact[] {
     if (!this.hasAppIdentity) return [];
     try {
@@ -188,11 +228,15 @@ export class FragmenterReaderService {
     this.hasSummary = this.tableExists('fragmenter_session_summaries');
     this.hasUserIdentity = this.tableExists('fragmenter_user_identities');
     this.hasAppIdentity = this.tableExists('fragmenter_app_identities');
+    this.hasExperienceLessons = this.tableExists(
+      'fragmenter_experience_lessons',
+    );
     this.tablesChecked = true;
     if (
       !this.hasSummary &&
       !this.hasUserIdentity &&
-      !this.hasAppIdentity
+      !this.hasAppIdentity &&
+      !this.hasExperienceLessons
     ) {
       this.log.log(
         'No fragmenter_* tables present yet; fragmented context will be empty until the fragmenter runs once.',

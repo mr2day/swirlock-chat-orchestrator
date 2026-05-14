@@ -174,6 +174,17 @@ export class ReverseControlFlowService {
     let thinkingForAnswer = false;
     let parsed: ParsedCommands;
 
+    // Load fragmenter context once for the whole turn — the
+    // classifier (assessment) round uses its `experienceLessons` to
+    // inform the SEARCH/DIRECT decision (Unit G); the answer round
+    // uses the full set. Loaded outside the try so a fragmenter-DB
+    // failure surfaces clearly rather than getting swallowed.
+    const fragmentedContext = this.fragmenterReader.load({
+      sessionId: ctx.sessionId,
+      userId: ctx.userId,
+      personaName: ctx.personaName,
+    });
+
     try {
       // ------- assessment round -------
       const assessmentMessages = buildAssessmentPrompt({
@@ -182,6 +193,7 @@ export class ReverseControlFlowService {
         dateTime,
         recentHistoryBlock: this.renderHistoryBlock(ctx.history),
         personaSystemPrompt: ctx.personaSystemPrompt,
+        experienceLessons: fragmentedContext.experienceLessons,
       });
 
       onPhase?.({
@@ -297,12 +309,6 @@ export class ReverseControlFlowService {
       });
       this.recordTrace(ctx, 'answer.streaming.started', {
         summary: `Streaming final answer (thinking=${thinkingForAnswer}).`,
-      });
-
-      const fragmentedContext = this.fragmenterReader.load({
-        sessionId: ctx.sessionId,
-        userId: ctx.userId,
-        personaName: ctx.personaName,
       });
 
       const budget = this.promptBudget.get();

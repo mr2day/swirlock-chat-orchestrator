@@ -159,10 +159,19 @@ export function buildAssessmentPrompt(args: {
   dateTime: string;
   recentHistoryBlock: string | null;
   personaSystemPrompt: string | null;
+  experienceLessons?: Array<{
+    content: string;
+    importance: 'core' | 'important' | 'incidental';
+  }>;
 }): LlmMessage[] {
+  const extraRules: string[] = [ASSESSMENT_COMMAND_RULES];
+  const lessonsBlock = renderExperienceLessonsForClassifier(
+    args.experienceLessons,
+  );
+  if (lessonsBlock) extraRules.push(lessonsBlock);
   const systemContent = buildSystemMessage({
     personaSystemPrompt: args.personaSystemPrompt,
-    extraRules: [ASSESSMENT_COMMAND_RULES],
+    extraRules,
   });
 
   const userParts: string[] = [
@@ -213,6 +222,10 @@ export interface FragmentedContextInput {
     importance: 'core' | 'important' | 'incidental';
   }>;
   appIdentity: Array<{
+    content: string;
+    importance: 'core' | 'important' | 'incidental';
+  }>;
+  experienceLessons: Array<{
     content: string;
     importance: 'core' | 'important' | 'incidental';
   }>;
@@ -540,13 +553,39 @@ function walkHistoryNewestFirst(
  * block in its own system message, so identity and summary are
  * decoupled.
  */
+/**
+ * Renders experience lessons as an extra system-message section for
+ * the classifier (assessment) round. Lessons are behavioural — they
+ * tell the model what to do differently when it sees a pattern it
+ * has previously gotten wrong. The classifier's SEARCH/DIRECT
+ * decision is exactly where they should bite.
+ */
+function renderExperienceLessonsForClassifier(
+  lessons:
+    | Array<{
+        content: string;
+        importance: 'core' | 'important' | 'incidental';
+      }>
+    | undefined,
+): string | null {
+  if (!lessons || lessons.length === 0) return null;
+  const lines: string[] = [
+    'Lessons from past mistakes you have made (apply them when deciding whether to SEARCH):',
+  ];
+  for (const lesson of lessons) {
+    lines.push(`- [${lesson.importance}] ${lesson.content}`);
+  }
+  return lines.join('\n');
+}
+
 function renderIdentityOnlyBlock(
   ctx: FragmentedContextInput | undefined,
 ): string | null {
   if (!ctx) return null;
   const hasUser = ctx.userIdentity.length > 0;
   const hasApp = ctx.appIdentity.length > 0;
-  if (!hasUser && !hasApp) return null;
+  const hasLessons = ctx.experienceLessons.length > 0;
+  if (!hasUser && !hasApp && !hasLessons) return null;
 
   const lines: string[] = ['Durable memory carried across turns:'];
 
@@ -557,10 +596,13 @@ function renderIdentityOnlyBlock(
     }
   }
 
-  if (hasApp) {
+  if (hasApp || hasLessons) {
     lines.push('', 'What you know about yourself (durable facts):');
     for (const fact of ctx.appIdentity) {
       lines.push(`- [${fact.importance}] ${fact.content}`);
+    }
+    for (const lesson of ctx.experienceLessons) {
+      lines.push(`- [lesson, ${lesson.importance}] ${lesson.content}`);
     }
   }
 
