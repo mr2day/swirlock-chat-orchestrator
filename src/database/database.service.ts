@@ -61,6 +61,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     `);
     this.alterSessionsForPersonaVariable();
     this.ensureSessionsTokenCounter();
+    this.ensureMessagesHallucinationIndex();
     this.connection.exec(`
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
@@ -267,6 +268,25 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         `Backfilled sessions.total_token_count for ${result.changes} session(s) (stored value was below the message-content sum).`,
       );
     }
+  }
+
+  /**
+   * Per-turn hallucination index, written by the fragmenter shortly
+   * after each assistant message lands. NULL = not yet evaluated;
+   * 0..10 = computed score (0 = no specific claims to check; 10 = at
+   * least one contradicted claim found). Owned at the schema level
+   * by the orchestrator (so future orchestrator code can read it)
+   * but the fragmenter is the sole writer at the moment.
+   */
+  private ensureMessagesHallucinationIndex(): void {
+    const cols = this.connection
+      .prepare(`PRAGMA table_info('messages')`)
+      .all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === 'hallucination_index')) return;
+    this.connection.exec(
+      `ALTER TABLE messages ADD COLUMN hallucination_index INTEGER;`,
+    );
+    this.log.log('Added column messages.hallucination_index');
   }
 
   private renameLegacyAgentEvents(): void {
