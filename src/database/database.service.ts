@@ -208,23 +208,65 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Adds `sessions.total_token_count` (INTEGER NOT NULL DEFAULT 0).
+   * Adds `sessions.total_token_count` (INTEGER NOT NULL DEFAULT 0)
+   * and backfills it from real message content on every boot.
+   *
    * Bumped on every persisted turn by ChatSessionService.appendTurn,
    * so the orchestrator can quickly know "how big has this session
    * grown" without iterating every message. Used by the prompt
    * budget logic (Unit J): when the running total approaches the
    * model's promptBudgetTokens, the assembly switches from "all raw"
    * to "summary + as much raw as fits".
+   *
+   * Backfill is necessary because:
+   * - When the column was first introduced, existing sessions got
+   *   the default 0. Their pre-migration messages were never
+   *   counted.
+   * - A single appendTurn after migration only adds the NEW turn's
+   *   tokens, leaving the column at "one turn's worth" while the
+   *   actual session is much bigger. The fast path then trusts a
+   *   wildly-wrong number and skips iteration, risking overflow.
+   *
+   * The fix recomputes total_token_count from the messages table
+   * for any session where the stored value is less than the
+   * sum-of-messages estimate. Idempotent and self-healing — runs
+   * on every boot but only writes when there's a discrepancy. The
+   * cost is one cheap SQL pass over the sessions × messages join.
+   *
+   * Token-estimate formula: ceil(LENGTH(content) / 3.5), matching
+   * estimateTokens() in chat/utils/token-estimator.ts. Encoded as
+   * ((LENGTH(content) * 2 + 6) / 7) for integer arithmetic; exact
+   * across the relevant range.
    */
   private ensureSessionsTokenCounter(): void {
     const cols = this.connection
       .prepare(`PRAGMA table_info('sessions')`)
       .all() as Array<{ name: string }>;
-    if (cols.some((c) => c.name === 'total_token_count')) return;
-    this.connection.exec(
-      `ALTER TABLE sessions ADD COLUMN total_token_count INTEGER NOT NULL DEFAULT 0;`,
-    );
-    this.log.log('Added column sessions.total_token_count');
+    if (!cols.some((c) => c.name === 'total_token_count')) {
+      this.connection.exec(
+        `ALTER TABLE sessions ADD COLUMN total_token_count INTEGER NOT NULL DEFAULT 0;`,
+      );
+      this.log.log('Added column sessions.total_token_count');
+    }
+
+    const result = this.connection
+      .prepare(
+        `UPDATE sessions
+            SET total_token_count = (
+              SELECT IFNULL(SUM(((LENGTH(content) * 2) + 6) / 7), 0)
+                FROM messages WHERE session_id = sessions.id
+            )
+          WHERE total_token_count < (
+            SELECT IFNULL(SUM(((LENGTH(content) * 2) + 6) / 7), 0)
+              FROM messages WHERE session_id = sessions.id
+          );`,
+      )
+      .run();
+    if (result.changes > 0) {
+      this.log.log(
+        `Backfilled sessions.total_token_count for ${result.changes} session(s) (stored value was below the message-content sum).`,
+      );
+    }
   }
 
   private renameLegacyAgentEvents(): void {
