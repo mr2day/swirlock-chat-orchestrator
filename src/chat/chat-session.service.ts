@@ -14,6 +14,7 @@ interface SessionRow {
   id: string;
   user_id: string;
   app_id: string;
+  persona_id: string | null;
   persona_name: string | null;
   persona_system_prompt: string | null;
   channel: string | null;
@@ -43,6 +44,8 @@ export interface SessionCreated {
 
 export interface SessionSnapshot {
   sessionId: string;
+  personaId: string | null;
+  personaName: string | null;
   createdAt: string;
   updatedAt: string;
   status: string;
@@ -112,13 +115,14 @@ export class ChatSessionService {
     this.db.connection
       .prepare(
         `INSERT INTO sessions
-           (id, user_id, app_id, persona_name, persona_system_prompt, channel, client_version, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+           (id, user_id, app_id, persona_id, persona_name, persona_system_prompt, channel, client_version, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
       )
       .run(
         sessionId,
         dto.participant.userId,
         dto.app.appId,
+        dto.persona?.id ?? null,
         dto.persona?.name ?? null,
         dto.persona?.systemPrompt ?? null,
         dto.client?.channel ?? null,
@@ -140,6 +144,8 @@ export class ChatSessionService {
       .all(sessionId) as MessageRow[];
     return {
       sessionId: session.id,
+      personaId: session.persona_id,
+      personaName: session.persona_name,
       createdAt: session.created_at,
       updatedAt: session.updated_at,
       status: session.status,
@@ -272,28 +278,42 @@ export class ChatSessionService {
    * authenticated user's sessions. The `title` is derived from the
    * first user message; sessions without any user message yet fall
    * back to "New chat".
+   *
+   * When `personaId` is provided the list is scoped to that persona
+   * only — sessions belonging to other personas are excluded. Each
+   * row carries its own `personaId` so a client can render a per-row
+   * avatar without round-tripping again.
    */
-  listSessions(args: { authUserId: string }): {
+  listSessions(args: {
+    authUserId: string;
+    personaId?: string | null;
+  }): {
     sessions: {
       sessionId: string;
+      personaId: string | null;
       title: string;
       createdAt: string;
       updatedAt: string;
     }[];
   } {
-    const rows = this.db.connection
-      .prepare(
-        `SELECT
-           s.id, s.created_at, s.updated_at,
-           (SELECT m.content FROM messages m
-             WHERE m.session_id = s.id AND m.role = 'user'
-             ORDER BY m.seq ASC LIMIT 1) AS first_user_content
-         FROM sessions s
-         WHERE s.user_id = ?
-         ORDER BY s.updated_at DESC`,
-      )
-      .all(args.authUserId) as {
+    const sql =
+      `SELECT
+         s.id, s.persona_id, s.created_at, s.updated_at,
+         (SELECT m.content FROM messages m
+           WHERE m.session_id = s.id AND m.role = 'user'
+           ORDER BY m.seq ASC LIMIT 1) AS first_user_content
+       FROM sessions s
+       WHERE s.user_id = ?` +
+      (args.personaId ? ` AND s.persona_id = ?` : ``) +
+      ` ORDER BY s.updated_at DESC`;
+    const stmt = this.db.connection.prepare(sql);
+    const rows = (
+      args.personaId
+        ? stmt.all(args.authUserId, args.personaId)
+        : stmt.all(args.authUserId)
+    ) as {
       id: string;
+      persona_id: string | null;
       created_at: string;
       updated_at: string;
       first_user_content: string | null;
@@ -301,6 +321,7 @@ export class ChatSessionService {
     return {
       sessions: rows.map((r) => ({
         sessionId: r.id,
+        personaId: r.persona_id,
         title: deriveTitle(r.first_user_content),
         createdAt: r.created_at,
         updatedAt: r.updated_at,

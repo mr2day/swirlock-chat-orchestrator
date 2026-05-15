@@ -25,6 +25,17 @@ class AppDto {
  * source of truth for persona name, prompt, and any persona-side state.
  */
 class PersonaDto {
+  /**
+   * Stable UI-side persona identifier (kebab-case, e.g.
+   * `marcello-voltieri`). Used to scope `session.list` so each
+   * persona sees only its own conversation history. Optional for
+   * backward compatibility with legacy clients that only sent
+   * `name` + `systemPrompt`.
+   */
+  @IsOptional()
+  @IsString()
+  id?: string;
+
   @IsString()
   name!: string;
 

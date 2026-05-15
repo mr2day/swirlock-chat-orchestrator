@@ -239,7 +239,15 @@ export class ChatStreamHandler {
     }
 
     if (envelope.type === 'session.list') {
-      const data = this.sessions.listSessions({ authUserId: ctx.authUserId });
+      const payload = (envelope.payload ?? {}) as { personaId?: unknown };
+      const personaId =
+        typeof payload.personaId === 'string' && payload.personaId.trim()
+          ? payload.personaId.trim()
+          : null;
+      const data = this.sessions.listSessions({
+        authUserId: ctx.authUserId,
+        personaId,
+      });
       this.send(ws, {
         type: 'session.listed',
         correlationId: envelope.correlationId,

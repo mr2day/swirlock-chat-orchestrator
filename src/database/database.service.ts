@@ -61,6 +61,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     `);
     this.alterSessionsForPersonaVariable();
     this.ensureSessionsTokenCounter();
+    this.ensureSessionsPersonaId();
     this.ensureMessagesHallucinationIndex();
     this.connection.exec(`
       CREATE TABLE IF NOT EXISTS messages (
@@ -268,6 +269,24 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         `Backfilled sessions.total_token_count for ${result.changes} session(s) (stored value was below the message-content sum).`,
       );
     }
+  }
+
+  /**
+   * UI-stable persona identifier (e.g. `gigi-the-robot`,
+   * `marcello-voltieri`). NULL on legacy rows created before this
+   * column existed; new sessions always receive it from the client.
+   * The orchestrator uses it to scope `session.list` so each persona
+   * sees only its own conversation history.
+   */
+  private ensureSessionsPersonaId(): void {
+    const cols = this.connection
+      .prepare(`PRAGMA table_info('sessions')`)
+      .all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === 'persona_id')) return;
+    this.connection.exec(
+      `ALTER TABLE sessions ADD COLUMN persona_id TEXT;`,
+    );
+    this.log.log('Added column sessions.persona_id');
   }
 
   /**
