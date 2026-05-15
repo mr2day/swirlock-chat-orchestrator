@@ -1,7 +1,10 @@
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { randomUUID } from 'crypto';
+import * as express from 'express';
+import * as fs from 'fs';
 import type { Server as HttpServer } from 'http';
+import * as path from 'path';
 import { WebSocketServer } from 'ws';
 import 'reflect-metadata';
 import { AppModule } from './app.module';
@@ -12,6 +15,7 @@ import { SERVICE_CONFIG } from './config/config';
 import type { ServiceConfig } from './config/config';
 
 const STREAM_PATH = '/v5/chat';
+const UPDATES_DIR = path.resolve(__dirname, '..', 'data', 'updates');
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
@@ -26,6 +30,8 @@ async function bootstrap(): Promise<void> {
   const cfg = app.get<ServiceConfig>(SERVICE_CONFIG);
   const streamHandler = app.get(ChatStreamHandler);
   const jwtVerifier = app.get(JwtVerifier);
+
+  attachLiveUpdateEndpoint(app);
 
   await app.listen(cfg.port, cfg.host);
 
@@ -108,6 +114,72 @@ function attachStreamServer(
       });
     })();
   });
+}
+
+/**
+ * Static-file endpoint that backs the Android APK's Capacitor Live
+ * Update plugin (@capgo/capacitor-updater). The plugin POSTs to
+ * /updates on each app launch with the device's current bundle
+ * version; we reply with whatever `data/updates/manifest.json`
+ * currently contains. The plugin compares the manifest version to
+ * its own and downloads the listed ZIP bundle if it's newer. The
+ * ZIPs themselves are served as plain static files at
+ * /updates/<filename>.
+ *
+ * No auth on this endpoint: the manifest and bundle are public —
+ * they contain the same compiled Angular code the SPA at
+ * gigi-the-robot.com already serves to anyone with a browser.
+ */
+function attachLiveUpdateEndpoint(
+  app: Awaited<ReturnType<typeof NestFactory.create>>,
+): void {
+  const log = new Logger('LiveUpdate');
+  const httpApp = app.getHttpAdapter().getInstance() as express.Express;
+
+  // Make sure the directory exists so file-not-found isn't reported
+  // as "manifest missing" on fresh deployments.
+  fs.mkdirSync(UPDATES_DIR, { recursive: true });
+
+  httpApp.post('/updates', express.json({ limit: '64kb' }), (_req, res) => {
+    const manifestPath = path.join(UPDATES_DIR, 'manifest.json');
+    if (!fs.existsSync(manifestPath)) {
+      res.set('Cache-Control', 'no-store');
+      res.status(200).json({ message: 'no update available' });
+      return;
+    }
+    try {
+      const raw = fs.readFileSync(manifestPath, 'utf8');
+      const manifest = JSON.parse(raw);
+      res.set('Cache-Control', 'no-store');
+      res.status(200).json(manifest);
+    } catch (err) {
+      log.warn(
+        `manifest read failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      res.status(500).json({ message: 'manifest unreadable' });
+    }
+  });
+
+  httpApp.use(
+    '/updates',
+    express.static(UPDATES_DIR, {
+      index: false,
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.zip')) {
+          // Bundle ZIPs are immutable per version — every push produces
+          // a fresh filename, so we can cache forever at every layer.
+          res.setHeader(
+            'Cache-Control',
+            'public, max-age=31536000, immutable',
+          );
+        } else {
+          res.setHeader('Cache-Control', 'no-store');
+        }
+      },
+    }),
+  );
+
+  log.log(`Live-update endpoint mounted at /updates (dir=${UPDATES_DIR})`);
 }
 
 void bootstrap();
