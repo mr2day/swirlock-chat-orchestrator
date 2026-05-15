@@ -185,20 +185,24 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Migrates the `sessions` table from the v4-era schema
-   * (`persona_id TEXT`) to the v5 schema
-   * (`persona_name TEXT`, `persona_system_prompt TEXT`).
-   * The persona definition now flows from the UI on session.create.
+   * Adds `persona_name` + `persona_system_prompt` columns when
+   * upgrading from a pre-v5 schema. Idempotent — no-op once both
+   * columns exist.
+   *
+   * The old v4→v5 step that DROPPED a numeric `persona_id` column
+   * has been removed: in v5.x the orchestrator re-introduced
+   * `persona_id` as a UI-defined kebab-case string identifier (see
+   * `ensureSessionsPersonaId` below). Keeping the legacy drop in
+   * place ran on every boot and silently wiped the new column's
+   * values, breaking the persona-scoped sidebar listing. Any
+   * deployment that actually had the v4 numeric column has long
+   * since been migrated through this code path.
    */
   private alterSessionsForPersonaVariable(): void {
     const cols = this.connection
       .prepare(`PRAGMA table_info('sessions')`)
       .all() as Array<{ name: string }>;
     const names = new Set(cols.map((c) => c.name));
-    if (names.has('persona_id')) {
-      this.log.log('Migrating sessions.persona_id → persona_name + persona_system_prompt');
-      this.connection.exec(`ALTER TABLE sessions DROP COLUMN persona_id;`);
-    }
     if (!names.has('persona_name')) {
       this.connection.exec(`ALTER TABLE sessions ADD COLUMN persona_name TEXT;`);
     }
