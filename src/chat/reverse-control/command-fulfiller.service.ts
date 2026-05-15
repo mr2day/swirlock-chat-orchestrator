@@ -107,11 +107,19 @@ export class CommandFulfillerService {
       const lines: string[] = [
         `Search query: "${query}" — ${result.evidence.length} result${result.evidence.length === 1 ? '' : 's'}:`,
       ];
-      for (const ev of result.evidence.slice(0, 15)) {
-        const url = ev.sourceUrl ? ` (${ev.sourceUrl})` : '';
+      // URLs are deliberately omitted from the prose the LLM sees.
+      // The model was observed lifting date slugs out of URL paths
+      // (`/2026/03/18/...` → "March 18 2026") in preference to the
+      // article body, and anchoring confident dated narratives on
+      // them. URLs stay on the orchestrator's `evidence` array for
+      // citation rendering in turn.done; they just aren't part of
+      // the answer-prompt context. Sources are labelled with a
+      // stable [Source N] tag so the model can reference them
+      // internally without seeing the URL.
+      result.evidence.slice(0, 15).forEach((ev, idx) => {
         const snippet = ev.snippet ? `: ${ev.snippet}` : '';
-        lines.push(`- ${ev.sourceTitle}${url}${snippet}`);
-      }
+        lines.push(`- [Source ${idx + 1}] ${ev.sourceTitle}${snippet}`);
+      });
       return {
         command: label,
         value: lines.join('\n'),

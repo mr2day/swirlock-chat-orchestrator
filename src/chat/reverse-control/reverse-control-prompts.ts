@@ -124,6 +124,29 @@ const ELABORATION_RULE = [
   'Use the names, dates, places, and connected details the sources mention, even if they go beyond the strict scope of the question — as long as those details are actually in the sources.',
 ].join('\n');
 
+/**
+ * Consensus rule, injected on every search-turn alongside
+ * ELABORATION_RULE. Treats the source set as a group rather than
+ * a buffet of independent claims to pick from.
+ *
+ * Motivating incident (2026-05-15): a SEARCH for the Dubois vs
+ * Itauma matchup returned 15 sources. 14 reported the fight had
+ * not happened yet (Dubois recently won the WBO title against
+ * Wardley, Itauma is the mandatory challenger, the matchup is
+ * scheduled for summer 2026). One outlier from a low-quality
+ * content farm claimed Itauma had TKO'd Dubois at Wembley on a
+ * specific date. The bot built a fully fabricated 1,800-char
+ * narrative on that single outlier, ignoring the 14 contradicting
+ * sources, and even invented details not in any of them ("90,000
+ * draped in Union Jacks", "left hook to the temple at 2:12").
+ */
+const CONSENSUS_RULE = [
+  'Read the sources as a group, not one at a time. When sources disagree, the majority wins:',
+  '- A claim supported by ONLY one source while contradicted by several others is unreliable. Do not build confident statements on an outlier. Say what most sources agree on, or surface the disagreement honestly ("most reporting says X, though one source claims Y").',
+  '- Pay attention to what most sources DO NOT say. If you are about to claim a dramatic event (a fight result, a death, a specific date, a quoted statement) and only one out of many sources mentions it, treat that as a red flag — content-farm or fabricated articles can produce such matches.',
+  '- Never invent details (named bodyguards, crowd size, specific punches, exact times, quoted reactions) that no source explicitly states, even if it would make the answer more vivid. Vividness is not worth fabrication.',
+].join('\n');
+
 const ASSESSMENT_COMMAND_RULES = [
   'This is where you give commands to the software controller. Available commands:',
   '',
@@ -302,10 +325,16 @@ export function buildAnswerPrompt(args: {
   // Always make the answering model aware of when/where the user is.
   systemParts.push(buildAnswerContextBlock(args.cityCountry, args.dateTime));
   if (args.fulfilledContext) {
-    // LANGUAGE_RULE before ELABORATION_RULE — small models weight the
-    // first system-message rule most heavily, so the language directive
+    // LANGUAGE_RULE before everything — small models weight the first
+    // system-message rule most heavily, so the language directive
     // needs the top slot.
     systemParts.push(LANGUAGE_RULE);
+    // CONSENSUS_RULE before ELABORATION_RULE. Interpretation comes
+    // before composition: decide what to believe from the sources,
+    // then decide how much to write about it. Reversing this lets the
+    // model elaborate first and consensus-check second, which is when
+    // outlier-source narratives slip through.
+    systemParts.push(CONSENSUS_RULE);
     systemParts.push(ELABORATION_RULE);
   }
 
