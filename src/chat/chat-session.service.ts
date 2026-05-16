@@ -9,6 +9,7 @@ import { estimateTokens } from './utils/token-estimator';
 import { DatabaseService } from '../database/database.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import type { InputPartDto } from './dto/submit-turn.dto';
+import { ImagePersistenceService } from './image-persistence.service';
 
 interface SessionRow {
   id: string;
@@ -42,6 +43,11 @@ export interface SessionCreated {
   status: 'active';
 }
 
+export interface PersistedImageRef {
+  imageId: string;
+  mimeType: string | null;
+}
+
 export interface SessionSnapshot {
   sessionId: string;
   personaId: string | null;
@@ -55,6 +61,13 @@ export interface SessionSnapshot {
     role: 'user' | 'assistant' | 'system';
     content: string;
     createdAt: string;
+    /**
+     * User-attached image references on this message. Populated only
+     * for user-role messages whose `parts_json` recorded image parts
+     * via the image-persistence service. Empty (omitted) when there
+     * are no images.
+     */
+    images?: PersistedImageRef[];
   }>;
 }
 
@@ -98,7 +111,10 @@ export interface LoadedSession {
  */
 @Injectable()
 export class ChatSessionService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly images: ImagePersistenceService,
+  ) {}
 
   createSession(args: {
     dto: CreateSessionDto;
@@ -149,13 +165,17 @@ export class ChatSessionService {
       createdAt: session.created_at,
       updatedAt: session.updated_at,
       status: session.status,
-      messages: messages.map((m) => ({
-        messageId: m.id,
-        turnId: m.turn_id,
-        role: m.role,
-        content: m.content,
-        createdAt: m.created_at,
-      })),
+      messages: messages.map((m) => {
+        const images = this.extractImageRefsFromPartsJson(m.parts_json);
+        return {
+          messageId: m.id,
+          turnId: m.turn_id,
+          role: m.role,
+          content: m.content,
+          createdAt: m.created_at,
+          ...(images ? { images } : {}),
+        };
+      }),
     };
   }
 
@@ -217,6 +237,15 @@ export class ChatSessionService {
         )
         .get(args.sessionId) as { m: number };
       let nextSeq = seqRow.m + 1;
+      // Persist any attached image bytes to disk and replace the
+      // base64 in `parts` with stable `imageId` references — see
+      // ImagePersistenceService. This is what lets the UI re-render
+      // pictures when the user reopens the session later, instead of
+      // seeing the literal string `"[redacted]"` as before.
+      const persistedParts = this.images.persistParts({
+        userMessageId,
+        parts: args.parts,
+      });
       this.db.connection
         .prepare(
           `INSERT INTO messages (id, session_id, turn_id, role, content, parts_json, created_at, seq)
@@ -227,7 +256,7 @@ export class ChatSessionService {
           args.sessionId,
           turnId,
           args.userText,
-          JSON.stringify(this.redactPersistedParts(args.parts)),
+          JSON.stringify(persistedParts),
           args.occurredAt,
           nextSeq++,
         );
@@ -340,14 +369,35 @@ export class ChatSessionService {
     return row;
   }
 
-  private redactPersistedParts(parts: InputPartDto[]): InputPartDto[] {
-    return parts.map((part) => {
-      if (part.type !== 'image' || !part.imageBase64) return part;
-      return {
-        ...part,
-        imageBase64: '[redacted]',
-      };
-    });
+  private extractImageRefsFromPartsJson(
+    raw: string | null,
+  ): PersistedImageRef[] | undefined {
+    if (!raw) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+    if (!Array.isArray(parsed)) return undefined;
+    const refs: PersistedImageRef[] = [];
+    for (const item of parsed) {
+      if (
+        typeof item !== 'object' ||
+        item === null ||
+        (item as { type?: unknown }).type !== 'image'
+      ) {
+        continue;
+      }
+      const obj = item as { imageId?: unknown; mimeType?: unknown };
+      if (typeof obj.imageId !== 'string' || !obj.imageId) continue;
+      refs.push({
+        imageId: obj.imageId,
+        mimeType:
+          typeof obj.mimeType === 'string' ? obj.mimeType : null,
+      });
+    }
+    return refs.length > 0 ? refs : undefined;
   }
 }
 

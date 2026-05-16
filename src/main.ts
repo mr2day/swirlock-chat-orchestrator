@@ -16,6 +16,7 @@ import type { ServiceConfig } from './config/config';
 
 const STREAM_PATH = '/v5/chat';
 const UPDATES_DIR = path.resolve(__dirname, '..', 'data', 'updates');
+const IMAGES_DIR = path.resolve(__dirname, '..', 'data', 'images');
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
@@ -32,6 +33,7 @@ async function bootstrap(): Promise<void> {
   const jwtVerifier = app.get(JwtVerifier);
 
   attachLiveUpdateEndpoint(app);
+  attachImagesEndpoint(app);
 
   await app.listen(cfg.port, cfg.host);
 
@@ -180,6 +182,39 @@ function attachLiveUpdateEndpoint(
   );
 
   log.log(`Live-update endpoint mounted at /updates (dir=${UPDATES_DIR})`);
+}
+
+/**
+ * Serves user-attached pictures back to the SPA / APK so reopened
+ * sessions can re-render the images the user pasted earlier. The
+ * filename is `<userMessageId>-<index>.<ext>` (written by
+ * ImagePersistenceService when the turn was originally submitted)
+ * and the URL is exposed at `/images/<that filename>`.
+ *
+ * No auth gate today: the filename is a UUID-derived random string
+ * the client only knows because the orchestrator gave it to them.
+ * Tighten with a Bearer check if these ever need to be private from
+ * other authenticated users on the same orchestrator.
+ */
+function attachImagesEndpoint(
+  app: Awaited<ReturnType<typeof NestFactory.create>>,
+): void {
+  const log = new Logger('Images');
+  const httpApp = app.getHttpAdapter().getInstance() as express.Express;
+  fs.mkdirSync(IMAGES_DIR, { recursive: true });
+  httpApp.use(
+    '/images',
+    express.static(IMAGES_DIR, {
+      index: false,
+      fallthrough: false,
+      setHeaders: (res) => {
+        // Images are immutable per messageId (we never overwrite an
+        // existing file with new bytes) — long-cache them everywhere.
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      },
+    }),
+  );
+  log.log(`Image endpoint mounted at /images (dir=${IMAGES_DIR})`);
 }
 
 void bootstrap();
