@@ -76,10 +76,11 @@ function buildAnswerContextBlock(
   return `Context you can rely on without being told:\n${bullets.join('\n')}\nUse these whenever they're relevant, but don't volunteer them unprompted.`;
 }
 
-const LANGUAGE_RULE =
-  "Reply in the exact language of the user's last query. If the user " +
-  'switched language on this turn, switch with them on the same turn — ' +
-  "do not carry the previous turn's language over.";
+const LANGUAGE_RULE = [
+  "LANGUAGE: detect the language of the user's last query and produce EVERY piece of text you generate in this turn in exactly that language — the user-facing reply, any search prompt you emit inside a [command=\"SEARCH\"][search_prompt=\"...\"] tag, anything else.",
+  "Persona style — Italian asides, Romanian endearments, French politeness markers, scattered loanwords, etc. — is decoration only. It does NOT override the user's language. If the user wrote in Romanian and your persona is Italian-flavored, you still reply in Romanian (with the persona's voice colouring the Romanian, not replacing it).",
+  "If the user switched language on this turn, switch with them on the same turn — do not carry the previous turn's language over.",
+].join('\n');
 
 /**
  * Injected into the answer-round system message ONLY when this turn has
@@ -169,10 +170,17 @@ function buildSystemMessage(args: {
   personaSystemPrompt: string | null;
   extraRules: string[];
 }): string {
-  const parts: string[] = [];
+  // LANGUAGE_RULE comes first. Small models weight the first system-
+  // message paragraph most heavily; the persona prose is heavy enough
+  // (700-1000 tokens of in-character voice) that anything pushed after
+  // it loses authority. Observed in production: a Romanian user query
+  // to Italian-flavored Marcello produced an Italian search prompt
+  // (Exa missed Eurovision) and an Italian reply, both because the
+  // persona's voice anchored the language slot before LANGUAGE_RULE
+  // got a chance to bind.
+  const parts: string[] = [LANGUAGE_RULE];
   if (args.personaSystemPrompt) parts.push(args.personaSystemPrompt);
   for (const rule of args.extraRules) parts.push(rule);
-  parts.push(LANGUAGE_RULE);
   return parts.join('\n\n');
 }
 
@@ -321,14 +329,18 @@ export function buildAnswerPrompt(args: {
   // --- 1. Build the always-mandatory parts as discrete system messages ---
 
   const systemParts: string[] = [];
+  // LANGUAGE_RULE is FIRST, unconditionally — before persona, before
+  // context, before any rule cluster. Small models weight the first
+  // system paragraph most heavily; the persona prose runs 700-1000
+  // tokens and will out-vote anything pushed after it. We hit this
+  // exact failure in production: a Romanian user query to
+  // Italian-flavored Marcello produced an Italian answer because the
+  // persona's voice anchored the language slot first.
+  systemParts.push(LANGUAGE_RULE);
   if (args.personaSystemPrompt) systemParts.push(args.personaSystemPrompt);
   // Always make the answering model aware of when/where the user is.
   systemParts.push(buildAnswerContextBlock(args.cityCountry, args.dateTime));
   if (args.fulfilledContext) {
-    // LANGUAGE_RULE before everything — small models weight the first
-    // system-message rule most heavily, so the language directive
-    // needs the top slot.
-    systemParts.push(LANGUAGE_RULE);
     // CONSENSUS_RULE before ELABORATION_RULE. Interpretation comes
     // before composition: decide what to believe from the sources,
     // then decide how much to write about it. Reversing this lets the
