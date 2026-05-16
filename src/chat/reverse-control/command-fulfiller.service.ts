@@ -96,7 +96,7 @@ export class CommandFulfillerService {
         abortSignal: ctx.abortSignal,
       });
 
-      if (result.evidence.length === 0) {
+      if (result.evidence.length === 0 && !result.preparedPrompt) {
         return {
           command: label,
           value: `Search query "${query}" returned no results.`,
@@ -104,18 +104,26 @@ export class CommandFulfillerService {
         };
       }
 
+      // Preferred path: the RAG Engine's utility-LLM distillation
+      // returned a prose answer-aid built from the uncapped extracted
+      // page text. Hand it straight to the answer round, wrapped so the
+      // main LLM knows where it came from.
+      if (result.preparedPrompt) {
+        return {
+          command: label,
+          value: `<search_results query="${query.replace(/"/g, '\\"')}">\n${result.preparedPrompt}\n</search_results>`,
+          evidence: result.evidence,
+        };
+      }
+
+      // Fallback (utility LLM unreachable / distillation skipped):
+      // build a [Source N] snippet block from the truncated evidence
+      // chunks. URLs are omitted on purpose — the main model was
+      // observed lifting date slugs out of URL paths in preference to
+      // the article body.
       const lines: string[] = [
         `Search query: "${query}" — ${result.evidence.length} result${result.evidence.length === 1 ? '' : 's'}:`,
       ];
-      // URLs are deliberately omitted from the prose the LLM sees.
-      // The model was observed lifting date slugs out of URL paths
-      // (`/2026/03/18/...` → "March 18 2026") in preference to the
-      // article body, and anchoring confident dated narratives on
-      // them. URLs stay on the orchestrator's `evidence` array for
-      // citation rendering in turn.done; they just aren't part of
-      // the answer-prompt context. Sources are labelled with a
-      // stable [Source N] tag so the model can reference them
-      // internally without seeing the URL.
       result.evidence.slice(0, 15).forEach((ev, idx) => {
         const snippet = ev.snippet ? `: ${ev.snippet}` : '';
         lines.push(`- [Source ${idx + 1}] ${ev.sourceTitle}${snippet}`);

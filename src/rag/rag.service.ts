@@ -41,6 +41,15 @@ export interface RagContext {
   retrievalUsed: boolean;
   retrievalMode: RetrievalMode;
   evidence: RagEvidence[];
+  /**
+   * Prose answer-aid produced by the RAG Engine's utility-LLM
+   * distillation step. Present when live retrieval ran and the
+   * utility LLM was reachable. The reverse-control command fulfiller
+   * uses this directly in the answer-round prompt instead of
+   * stitching evidence snippets itself.
+   */
+  preparedPrompt?: string;
+  preparedPromptModel?: string | null;
   diagnostics?: Record<string, unknown>;
 }
 
@@ -93,6 +102,8 @@ interface RetrieveEvidenceData {
     sourceUrl?: string;
     content?: string;
   }>;
+  preparedPrompt?: string;
+  preparedPromptModel?: string | null;
   retrievalDiagnostics?: Record<string, unknown>;
 }
 
@@ -236,10 +247,22 @@ export class RagService implements OnModuleInit, OnModuleDestroy {
           }))
       : [];
 
+    const preparedPrompt =
+      typeof data.preparedPrompt === 'string' && data.preparedPrompt.trim()
+        ? data.preparedPrompt
+        : undefined;
+    const preparedPromptModel =
+      data.preparedPromptModel === null ||
+      typeof data.preparedPromptModel === 'string'
+        ? data.preparedPromptModel
+        : undefined;
+
     return {
       retrievalUsed: retrievalMode !== 'none',
       retrievalMode,
       evidence,
+      ...(preparedPrompt ? { preparedPrompt } : {}),
+      ...(preparedPromptModel !== undefined ? { preparedPromptModel } : {}),
       ...(data.retrievalDiagnostics
         ? { diagnostics: data.retrievalDiagnostics }
         : {}),
