@@ -111,7 +111,7 @@ export class CommandFulfillerService {
       const top = result.evidence[0];
       const body = top.snippet?.trim() ?? '';
       const groundingRule =
-        'When you answer, use only facts visibly present in the source above. If the source does not cover the specific time, topic, or detail the user is asking about, say so plainly — do not promote the nearest visible entry to fill the gap. Truncation or absence in the source is not evidence about the real world.';
+        'Be yourself in how you answer — voice, opinions, asides, recommendations are all welcome. But factual claims about the world (times, names, what is airing, what happened) must come from what is visibly present in the source above. If the source does not cover the specific thing the user is asking about, say so plainly — do not promote the nearest visible entry as the answer, and do not invent details to bridge a gap. Truncation or absence in the source is not evidence about the real world.';
       const value = body
         ? `Search query: "${query}" — top result:\n[Source 1] ${top.sourceTitle}\n${body}\n\n${groundingRule}`
         : `Search query: "${query}" — top result: ${top.sourceTitle} (no extractable body)\n\n${groundingRule}`;
