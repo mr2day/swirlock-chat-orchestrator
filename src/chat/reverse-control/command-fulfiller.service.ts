@@ -110,9 +110,11 @@ export class CommandFulfillerService {
       // (up to Exa's own ceiling, currently text.maxCharacters=24000).
       const top = result.evidence[0];
       const body = top.snippet?.trim() ?? '';
+      const groundingRule =
+        'When you answer, use only facts visibly present in the source above. If the source does not cover the specific time, topic, or detail the user is asking about, say so plainly — do not promote the nearest visible entry to fill the gap. Truncation or absence in the source is not evidence about the real world.';
       const value = body
-        ? `Search query: "${query}" — top result:\n[Source 1] ${top.sourceTitle}\n${body}`
-        : `Search query: "${query}" — top result: ${top.sourceTitle} (no extractable body)`;
+        ? `Search query: "${query}" — top result:\n[Source 1] ${top.sourceTitle}\n${body}\n\n${groundingRule}`
+        : `Search query: "${query}" — top result: ${top.sourceTitle} (no extractable body)\n\n${groundingRule}`;
       return {
         command: label,
         value,
