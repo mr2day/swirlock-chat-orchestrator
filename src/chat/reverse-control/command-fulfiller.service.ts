@@ -99,16 +99,17 @@ export class CommandFulfillerService {
 
     try {
       // Parallel fan-out: fire one RAG retrieve per query angle. The
-      // RAG Engine handles each request concurrently. We merge by URL
-      // afterwards, keeping the highest-ranked occurrence of each
-      // source across the fan-out. Result-order is preserved from the
-      // first query that surfaced each URL — so the lead source the
-      // answer model sees is whatever the first query's top hit was.
+      // RAG Engine handles each request concurrently. Each leg gets a
+      // unique correlationId (the turn correlation + a leg suffix) —
+      // the orchestrator's persistent RAG socket keys pending requests
+      // by correlationId, so reusing the turn id across legs would
+      // overwrite each leg's resolver and only the last one would ever
+      // settle, hanging Promise.all forever. We merge by URL afterwards.
       const fanout = await Promise.all(
-        queries.map((q) =>
+        queries.map((q, idx) =>
           this.rag
             .retrieve({
-              correlationId: ctx.correlationId,
+              correlationId: `${ctx.correlationId}:leg${idx}`,
               sessionId: ctx.sessionId,
               userText: ctx.userText,
               parts: [{ type: 'text', text: q }],
