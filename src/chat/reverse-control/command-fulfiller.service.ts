@@ -87,13 +87,26 @@ export class CommandFulfillerService {
     ctx: FulfillContext,
     knownLocation: UserLocation | undefined,
   ): Promise<FulfillmentResult> {
-    const queries =
-      searchPrompts.map((p) => p.trim()).filter(Boolean).length > 0
-        ? searchPrompts.map((p) => p.trim()).filter(Boolean)
-        : [ctx.userText.trim()];
+    // Always include the user's RAW text as the first fan-out leg.
+    // The classifier's rewrites sometimes narrow the query and drop
+    // the page that actually answers the question — e.g. on the TVR1
+    // turn the user typed "ce e la TVR1 in momentul asta?" and the
+    // raw form surfaced yesterday's TVR1 schedule (which had the
+    // Eurovision Final entry that ran past midnight), while the
+    // classifier's "17 mai 2026 ora 02:22"-anchored rewrites pushed
+    // that page out. Keep the raw query as a baseline; let the
+    // rewrites add coverage, not replace it.
+    const rawQuery = ctx.userText.trim();
+    const rewrites = searchPrompts
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .filter((p) => p.toLowerCase() !== rawQuery.toLowerCase());
+    const queries = rawQuery
+      ? [rawQuery, ...rewrites].slice(0, 4)
+      : rewrites.slice(0, 3);
     if (searchPrompts.length === 0) {
       this.log.warn(
-        `${label} command emitted without any [search_prompt="..."] tag; falling back to userText.`,
+        `${label} command emitted without any [search_prompt="..."] tag; running fan-out with the raw user query alone.`,
       );
     }
 
@@ -193,7 +206,7 @@ export class CommandFulfillerService {
 
       const queryLabel = queries.length === 1
         ? `Search query: "${queries[0]}"`
-        : `Search fan-out (${queries.length} parallel queries): ${queries.map((q) => `"${q}"`).join(', ')}`;
+        : `Search fan-out (${queries.length} parallel queries; leg 1 = raw user text, legs 2..${queries.length} = classifier rewrites): ${queries.map((q) => `"${q}"`).join(', ')}`;
       const value = `${queryLabel} — top ${bodied.length} result${bodied.length === 1 ? '' : 's'} (full bodies below):\n\n${bodiedBlocks.join('\n\n')}${titleOnlyBlock}\n\n${groundingRule}`;
       return {
         command: label,
