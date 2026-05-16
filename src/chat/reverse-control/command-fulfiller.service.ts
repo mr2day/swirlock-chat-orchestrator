@@ -141,42 +141,60 @@ export class CommandFulfillerService {
         };
       }
 
-      // Source 1 gets its full body in the prompt. Sources 2..N ride
-      // along as title+URL only so the model can spot a missed angle
-      // and tell the user to open the citation panel.
-      const top = merged[0];
-      const body = top.snippet?.trim() ?? '';
-      const others = merged.slice(1);
-      const othersBlock =
-        others.length > 0
-          ? '\n\nOther sources also returned across this fan-out (title + URL only; full body not loaded — the user can open them from the citation panel):\n' +
-            others
+      // Feed the top BODY_SOURCE_COUNT sources' full bodies to the
+      // answer round (capped at PER_SOURCE_BODY_CAP chars each so the
+      // total stays inside ministral's ~26K prompt budget). Sources
+      // beyond that still ride along as title+URL only. Motivating
+      // incident: TVR1/Eurovision turn — the Eurovision-Final entry
+      // sat in the BODY of Source 3 ("Program TVR 1 16.05.2026"),
+      // not in Source 1's body or any source's title. Feeding only
+      // Source 1's body blinded the model to it.
+      const BODY_SOURCE_COUNT = 5;
+      const PER_SOURCE_BODY_CAP = 10000;
+      const bodied = merged.slice(0, BODY_SOURCE_COUNT);
+      const titleOnly = merged.slice(BODY_SOURCE_COUNT);
+
+      const bodiedBlocks = bodied.map((ev, i) => {
+        const raw = (ev.snippet ?? '').trim();
+        const capped =
+          raw.length <= PER_SOURCE_BODY_CAP
+            ? raw
+            : `${raw.slice(0, PER_SOURCE_BODY_CAP - 3).trimEnd()}...`;
+        const header = `[Source ${i + 1}] ${ev.sourceTitle}`;
+        return capped ? `${header}\n${capped}` : `${header} (no extractable body)`;
+      });
+
+      const titleOnlyBlock =
+        titleOnly.length > 0
+          ? '\n\nAdditional sources returned across this fan-out (title + URL only; full body not loaded — the user can open them from the citation panel):\n' +
+            titleOnly
               .map(
                 (ev, i) =>
-                  `- [Source ${i + 2}] ${ev.sourceTitle} — ${ev.sourceUrl ?? '(no url)'}`,
+                  `- [Source ${BODY_SOURCE_COUNT + i + 1}] ${ev.sourceTitle} — ${ev.sourceUrl ?? '(no url)'}`,
               )
               .join('\n')
           : '';
+
       const groundingRule = [
         'GROUNDING RULES (apply these strictly to factual claims; persona voice / asides / opinions / recommendations are unaffected):',
         '',
-        '1. Before naming ANY specific show, movie, programme, time, person, place, or numeric detail, check: is this exact string visibly present somewhere in Source 1 above? If not, you may NOT name it. This includes plausible-sounding TV shows that "feel right" (e.g. Indian serials, Turkish dramas, daily news bulletins) — if the title is not in Source 1, do not write it.',
+        '1. Before naming ANY specific show, movie, programme, time, person, place, or numeric detail, check: is this exact string visibly present somewhere in the source bodies above? If not, you may NOT name it. This includes plausible-sounding TV shows that "feel right" (e.g. Indian serials, Turkish dramas, daily news bulletins) — if the title is not in any source body, do not write it.',
         '',
-        '2. If Source 1 does not cover the time, topic, or detail the user is asking about, say so plainly. Do NOT substitute a plausible-sounding guess ("probably a commercial loop", "perhaps the news", "likely a Turkish serial"). "I don\'t know what\'s airing right now from this source" is the correct answer when the source is silent.',
+        '2. Read ACROSS all the source bodies, not just the first one. If the user\'s question is about "what is airing right now" and the first source\'s schedule starts at a time later than now, check the other source bodies for an entry that covers the current moment (a live broadcast spanning midnight, a special event running into the small hours). Cross-day live events often appear in a different source than the daily-schedule page.',
         '',
-        '3. Truncation or absence in Source 1 is not evidence about the real world. Do not promote the nearest visible entry to fill a gap.',
+        '3. If no source body covers the time, topic, or detail the user is asking about, say so plainly. Do NOT substitute a plausible-sounding guess ("probably a commercial loop", "perhaps the news", "likely a Turkish serial"). "I don\'t know what\'s airing right now from these sources" is the correct answer when all sources are silent on the specific question.',
         '',
-        '4. If one of the other listed sources (Sources 2..N) has a title that looks directly relevant to what the user asked, tell the user that source is available in the citation panel. Do NOT fabricate the contents of those sources — you only have their titles and URLs.',
+        '4. Truncation or absence in the sources is not evidence about the real world. Do not promote the nearest visible entry from one source to fill a gap that another source might fill correctly.',
         '',
-        '5. Recommendations and opinions are fine ("you might enjoy a Visconti film tonight", "I\'d skip the late-night devotionals if I were you") as long as they are clearly subjective and not presented as facts about the schedule.',
+        '5. If one of the title-only sources looks directly relevant to what the user asked (its title alone is the clue), tell the user that source is available in the citation panel. Do NOT fabricate the contents of title-only sources — you have only their titles and URLs.',
+        '',
+        '6. Recommendations and opinions are fine ("you might enjoy a Visconti film tonight", "I\'d skip the late-night devotionals if I were you") as long as they are clearly subjective and not presented as facts about the schedule.',
       ].join('\n');
 
       const queryLabel = queries.length === 1
         ? `Search query: "${queries[0]}"`
         : `Search fan-out (${queries.length} parallel queries): ${queries.map((q) => `"${q}"`).join(', ')}`;
-      const value = body
-        ? `${queryLabel} — top result:\n[Source 1] ${top.sourceTitle}\n${body}${othersBlock}\n\n${groundingRule}`
-        : `${queryLabel} — top result: ${top.sourceTitle} (no extractable body)${othersBlock}\n\n${groundingRule}`;
+      const value = `${queryLabel} — top ${bodied.length} result${bodied.length === 1 ? '' : 's'} (full bodies below):\n\n${bodiedBlocks.join('\n\n')}${titleOnlyBlock}\n\n${groundingRule}`;
       return {
         command: label,
         value,
