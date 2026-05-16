@@ -104,10 +104,11 @@ export class CommandFulfillerService {
         };
       }
 
-      // Single-pass pattern: feed the top Exa result's full extracted
-      // text directly to the answer round. No second-LLM distillation,
-      // no per-source clipping. The body text comes through uncapped
-      // (up to Exa's own ceiling, currently text.maxCharacters=24000).
+      // Single-pass pattern: the RAG Engine returns up to 10 sources
+      // (full extracted body text each), but the answer round only
+      // sees the top one's body. The remaining sources still ride
+      // back on `evidence` so they surface in the UI citation panel
+      // for the user to read and cross-check.
       const top = result.evidence[0];
       const body = top.snippet?.trim() ?? '';
       const groundingRule =
@@ -118,7 +119,7 @@ export class CommandFulfillerService {
       return {
         command: label,
         value,
-        evidence: [top],
+        evidence: result.evidence,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
