@@ -104,18 +104,29 @@ export class CommandFulfillerService {
         };
       }
 
-      // Single-pass pattern: the RAG Engine returns up to 10 sources
-      // (full extracted body text each), but the answer round only
-      // sees the top one's body. The remaining sources still ride
-      // back on `evidence` so they surface in the UI citation panel
-      // for the user to read and cross-check.
+      // Source 1 gets its full body in the prompt. Sources 2..N ride
+      // along as title+URL only — the model can reference them and
+      // point the user to the citation panel if their title suggests
+      // they answer something Source 1 missed. Cheap (~400 tokens for
+      // 9 entries) but lets the model break out of single-source
+      // tunnel vision when the top result is the wrong page.
       const top = result.evidence[0];
       const body = top.snippet?.trim() ?? '';
+      const others = result.evidence.slice(1);
+      const othersBlock = others.length > 0
+        ? '\n\nOther sources also returned for this query (title + URL only; full body not loaded into this prompt — the user can open them from the citation panel):\n' +
+          others
+            .map(
+              (ev, i) =>
+                `- [Source ${i + 2}] ${ev.sourceTitle} — ${ev.sourceUrl ?? '(no url)'}`,
+            )
+            .join('\n')
+        : '';
       const groundingRule =
-        'Be yourself in how you answer — voice, opinions, asides, recommendations are all welcome. But factual claims about the world (times, names, what is airing, what happened) must come from what is visibly present in the source above. If the source does not cover the specific thing the user is asking about, say so plainly — do not promote the nearest visible entry as the answer, and do not invent details to bridge a gap. Truncation or absence in the source is not evidence about the real world.';
+        'Be yourself in how you answer — voice, opinions, asides, recommendations are all welcome. But factual claims about the world (times, names, what is airing, what happened) must come from what is visibly present in Source 1 above. If Source 1 does not cover the specific thing the user is asking about, say so plainly — do not promote the nearest visible entry in Source 1 as the answer, and do not invent details to bridge a gap. Truncation or absence in Source 1 is not evidence about the real world. If one of the other listed sources has a title that looks directly relevant to what the user asked, tell the user that source is available in the citation panel — do not fabricate the contents of sources 2 onward, since you only have their titles and URLs, not their text.';
       const value = body
-        ? `Search query: "${query}" — top result:\n[Source 1] ${top.sourceTitle}\n${body}\n\n${groundingRule}`
-        : `Search query: "${query}" — top result: ${top.sourceTitle} (no extractable body)\n\n${groundingRule}`;
+        ? `Search query: "${query}" — top result:\n[Source 1] ${top.sourceTitle}\n${body}${othersBlock}\n\n${groundingRule}`
+        : `Search query: "${query}" — top result: ${top.sourceTitle} (no extractable body)${othersBlock}\n\n${groundingRule}`;
       return {
         command: label,
         value,
