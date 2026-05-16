@@ -201,12 +201,28 @@ export function buildAssessmentPrompt(args: {
     content: string;
     importance: 'core' | 'important' | 'incidental';
   }>;
+  /**
+   * Optional "what's happening today" briefing assembled by the
+   * orchestrator's DailyBriefingService. When present, gives the
+   * classifier prior knowledge about ongoing live events / breaking
+   * news so it can write search queries that surface event-specific
+   * pages rather than generic listings.
+   */
+  dailyBriefing?: string;
 }): LlmMessage[] {
   const extraRules: string[] = [ASSESSMENT_COMMAND_RULES];
   const lessonsBlock = renderExperienceLessonsForClassifier(
     args.experienceLessons,
   );
   if (lessonsBlock) extraRules.push(lessonsBlock);
+  if (args.dailyBriefing && args.dailyBriefing.trim()) {
+    extraRules.push(
+      [
+        "Today's events briefing (use this to bias the search queries you emit when the user asks about live events, breaking news, or what is airing right now — pull keywords from here into your [search_prompt] tags so Exa surfaces the relevant pages instead of generic listings):",
+        args.dailyBriefing.trim(),
+      ].join('\n'),
+    );
+  }
   const systemContent = buildSystemMessage({
     personaSystemPrompt: args.personaSystemPrompt,
     extraRules,

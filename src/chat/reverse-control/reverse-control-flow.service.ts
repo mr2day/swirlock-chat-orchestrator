@@ -29,6 +29,7 @@ import {
   extractUserText,
 } from '../chat-session.service';
 import { ConversationHistoryService } from '../conversation/conversation-history.service';
+import { DailyBriefingService } from '../daily-briefing.service';
 import { GeocodingService } from '../location/geocoding.service';
 import { DecisionTraceService } from '../trace/decision-trace.service';
 import type { ConversationMessage } from '../conversation/conversation-history.service';
@@ -155,6 +156,7 @@ export class ReverseControlFlowService {
     private readonly trace: DecisionTraceService,
     private readonly capping: CappingService,
     private readonly fulfiller: CommandFulfillerService,
+    private readonly dailyBriefing: DailyBriefingService,
   ) {}
 
   async runTurn(input: RunTurnInput): Promise<TurnDoneEnvelope> {
@@ -185,8 +187,23 @@ export class ReverseControlFlowService {
       personaName: ctx.personaName,
     });
 
+    // Fire the "today's events" briefing fetch in parallel with the
+    // rest of the assessment-round setup. First request of the hour
+    // pays ~2s of latency; cache hits return synchronously. The
+    // briefing gives the classifier prior knowledge so it can write
+    // search queries that surface live events (Eurovision, breaking
+    // news, sports finals) instead of generic schedule queries that
+    // never reach the event-specific pages.
+    const briefingPromise = this.dailyBriefing.getBriefing({
+      sessionId: ctx.sessionId,
+      correlationId: ctx.correlationId,
+      userText: ctx.userText,
+      dateTime,
+    });
+
     try {
       // ------- assessment round -------
+      const dailyBriefing = await briefingPromise;
       const assessmentMessages = buildAssessmentPrompt({
         userText: ctx.userText,
         cityCountry,
@@ -194,6 +211,7 @@ export class ReverseControlFlowService {
         recentHistoryBlock: this.renderHistoryBlock(ctx.history),
         personaSystemPrompt: ctx.personaSystemPrompt,
         experienceLessons: fragmentedContext.experienceLessons,
+        ...(dailyBriefing ? { dailyBriefing } : {}),
       });
 
       onPhase?.({

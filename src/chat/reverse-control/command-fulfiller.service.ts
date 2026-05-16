@@ -157,8 +157,19 @@ export class CommandFulfillerService {
               )
               .join('\n')
           : '';
-      const groundingRule =
-        'Be yourself in how you answer — voice, opinions, asides, recommendations are all welcome. But factual claims about the world (times, names, what is airing, what happened) must come from what is visibly present in Source 1 above. If Source 1 does not cover the specific thing the user is asking about, say so plainly — do not promote the nearest visible entry in Source 1 as the answer, and do not invent details to bridge a gap. Truncation or absence in Source 1 is not evidence about the real world. If one of the other listed sources has a title that looks directly relevant to what the user asked, tell the user that source is available in the citation panel — do not fabricate the contents of sources 2 onward, since you only have their titles and URLs, not their text.';
+      const groundingRule = [
+        'GROUNDING RULES (apply these strictly to factual claims; persona voice / asides / opinions / recommendations are unaffected):',
+        '',
+        '1. Before naming ANY specific show, movie, programme, time, person, place, or numeric detail, check: is this exact string visibly present somewhere in Source 1 above? If not, you may NOT name it. This includes plausible-sounding TV shows that "feel right" (e.g. Indian serials, Turkish dramas, daily news bulletins) — if the title is not in Source 1, do not write it.',
+        '',
+        '2. If Source 1 does not cover the time, topic, or detail the user is asking about, say so plainly. Do NOT substitute a plausible-sounding guess ("probably a commercial loop", "perhaps the news", "likely a Turkish serial"). "I don\'t know what\'s airing right now from this source" is the correct answer when the source is silent.',
+        '',
+        '3. Truncation or absence in Source 1 is not evidence about the real world. Do not promote the nearest visible entry to fill a gap.',
+        '',
+        '4. If one of the other listed sources (Sources 2..N) has a title that looks directly relevant to what the user asked, tell the user that source is available in the citation panel. Do NOT fabricate the contents of those sources — you only have their titles and URLs.',
+        '',
+        '5. Recommendations and opinions are fine ("you might enjoy a Visconti film tonight", "I\'d skip the late-night devotionals if I were you") as long as they are clearly subjective and not presented as facts about the schedule.',
+      ].join('\n');
 
       const queryLabel = queries.length === 1
         ? `Search query: "${queries[0]}"`

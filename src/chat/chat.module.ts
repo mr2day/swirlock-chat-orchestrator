@@ -7,6 +7,7 @@ import { CappingModule } from './capping/capping.module';
 import { ChatSessionService } from './chat-session.service';
 import { ChatStreamHandler } from './chat-stream.handler';
 import { ConversationHistoryService } from './conversation/conversation-history.service';
+import { DailyBriefingService } from './daily-briefing.service';
 import { ImagePersistenceService } from './image-persistence.service';
 import { LocationModule } from './location/location.module';
 import { CommandFulfillerService } from './reverse-control/command-fulfiller.service';
@@ -27,6 +28,7 @@ import { DecisionTraceService } from './trace/decision-trace.service';
     ChatStreamHandler,
     CommandFulfillerService,
     ConversationHistoryService,
+    DailyBriefingService,
     DecisionTraceService,
     ImagePersistenceService,
     ReverseControlFlowService,
