@@ -7,7 +7,6 @@ import type {
   RetrievalStreamEvent,
   UserLocation,
 } from '../../rag/rag.service';
-import { ActiveSlotService } from './active-slot.service';
 import type { CommandKind, ParsedCommands } from './command-parser';
 
 export interface FulfillContext {
@@ -15,8 +14,6 @@ export interface FulfillContext {
   sessionId: string;
   userText: string;
   occurredAt: string;
-  /** Human-formatted local wall-clock time, e.g. "17 May 2026, 02:22". */
-  dateTime: string;
   abortSignal: AbortSignal;
   initialLocation: UserLocation | undefined;
   resolveUserLocation: () => Promise<UserLocation | null>;
@@ -52,7 +49,6 @@ export class CommandFulfillerService {
   constructor(
     @Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig,
     private readonly rag: RagService,
-    private readonly activeSlot: ActiveSlotService,
   ) {}
 
   async fulfill(
@@ -208,31 +204,10 @@ export class CommandFulfillerService {
         '6. Recommendations and opinions are fine ("you might enjoy a Visconti film tonight", "I\'d skip the late-night devotionals if I were you") as long as they are clearly subjective and not presented as facts about the schedule.',
       ].join('\n');
 
-      // For "what's airing right now?" style questions, ask the
-      // utility LLM to compute the active slot deterministically and
-      // inject the result as a fact the answer model can rely on.
-      // ministral-3:14b is unreliable at interval arithmetic over
-      // schedule tables (it kept picking the first listed entry as
-      // "current" regardless of the time gap). Offloading this
-      // narrow task to the utility model closes that failure class.
-      const activeSlot = await this.activeSlot.resolve({
-        correlationId: ctx.correlationId,
-        userText: ctx.userText,
-        dateTime: ctx.dateTime,
-        sources: bodied.map((ev, i) => ({
-          index: i + 1,
-          title: ev.sourceTitle,
-          body: ev.snippet ?? '',
-        })),
-      });
-      const activeSlotBlock = activeSlot
-        ? `\n\nResolved active slot (computed deterministically from the sources by a helper model — use this as the answer to "what is airing right now" unless contradicted by Source 1's body):\n${activeSlot.factLine}`
-        : '';
-
       const queryLabel = queries.length === 1
         ? `Search query: "${queries[0]}"`
         : `Search fan-out (${queries.length} parallel queries; leg 1 = raw user text, legs 2..${queries.length} = classifier rewrites): ${queries.map((q) => `"${q}"`).join(', ')}`;
-      const value = `${queryLabel} — top ${bodied.length} result${bodied.length === 1 ? '' : 's'} (full bodies below):\n\n${bodiedBlocks.join('\n\n')}${titleOnlyBlock}${activeSlotBlock}\n\n${groundingRule}`;
+      const value = `${queryLabel} — top ${bodied.length} result${bodied.length === 1 ? '' : 's'} (full bodies below):\n\n${bodiedBlocks.join('\n\n')}${titleOnlyBlock}\n\n${groundingRule}`;
       return {
         command: label,
         value,

@@ -319,7 +319,6 @@ export class ReverseControlFlowService {
             sessionId: ctx.sessionId,
             userText: ctx.userText,
             occurredAt: ctx.occurredAt,
-            dateTime,
             abortSignal: input.abortSignal,
             initialLocation: location,
             resolveUserLocation: input.resolveUserLocation,

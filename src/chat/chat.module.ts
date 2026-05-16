@@ -10,7 +10,6 @@ import { ConversationHistoryService } from './conversation/conversation-history.
 import { DailyBriefingService } from './daily-briefing.service';
 import { ImagePersistenceService } from './image-persistence.service';
 import { LocationModule } from './location/location.module';
-import { ActiveSlotService } from './reverse-control/active-slot.service';
 import { CommandFulfillerService } from './reverse-control/command-fulfiller.service';
 import { ReverseControlFlowService } from './reverse-control/reverse-control-flow.service';
 import { DecisionTraceService } from './trace/decision-trace.service';
@@ -25,7 +24,6 @@ import { DecisionTraceService } from './trace/decision-trace.service';
     CappingModule,
   ],
   providers: [
-    ActiveSlotService,
     ChatSessionService,
     ChatStreamHandler,
     CommandFulfillerService,
