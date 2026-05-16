@@ -17,6 +17,17 @@ export interface LlmHostConfig {
   timeoutMs: number;
 }
 
+export interface UtilityLlmHostConfig {
+  /** When false, classifier turns run on the main LlmHost. */
+  enabled: boolean;
+  /** WS URL of the remote utility model host (e.g. gemma4:e4b @ 192.168.0.194:3213). */
+  baseUrl: string;
+  callerService: string;
+  timeoutMs: number;
+  /** When true, on unreachable/error the classifier silently falls back to the main LlmHost. */
+  fallbackToMainOnError: boolean;
+}
+
 export interface RagConfig {
   enabled: boolean;
   baseUrl: string | null;
@@ -47,6 +58,7 @@ export interface ServiceConfig {
   auth: AuthConfig;
   database: DatabaseConfig;
   llmHost: LlmHostConfig;
+  utilityLlmHost: UtilityLlmHostConfig;
   rag: RagConfig;
   fragmenter: FragmenterConfig;
 }
@@ -77,6 +89,25 @@ function validate(c: ServiceConfig): void {
   must(c.llmHost?.baseUrl, 'llmHost.baseUrl required');
   must(c.llmHost?.callerService, 'llmHost.callerService required');
   must(typeof c.llmHost?.timeoutMs === 'number', 'llmHost.timeoutMs required');
+  must(
+    typeof c.utilityLlmHost?.enabled === 'boolean',
+    'utilityLlmHost.enabled required',
+  );
+  if (c.utilityLlmHost?.enabled) {
+    must(c.utilityLlmHost.baseUrl, 'utilityLlmHost.baseUrl required when enabled');
+    must(
+      c.utilityLlmHost.callerService,
+      'utilityLlmHost.callerService required when enabled',
+    );
+    must(
+      typeof c.utilityLlmHost.timeoutMs === 'number',
+      'utilityLlmHost.timeoutMs required when enabled',
+    );
+    must(
+      typeof c.utilityLlmHost.fallbackToMainOnError === 'boolean',
+      'utilityLlmHost.fallbackToMainOnError required when enabled',
+    );
+  }
   must(typeof c.rag?.enabled === 'boolean', 'rag.enabled required');
   if (!c.rag) throw new Error('service.config.cjs invalid: rag required');
   const rag = c.rag;

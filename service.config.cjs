@@ -48,6 +48,21 @@ const env = {
     timeoutMs: 120000,
   },
 
+  // Utility LLM Host — a smaller / faster / wider-context model
+  // running on a separate machine, used for "support work" that
+  // shouldn't tie up the main answer model: the classifier
+  // (assessment round) and deterministic helpers like the
+  // active-slot resolver. Currently gemma4:e4b at 128K ctx on
+  // 192.168.0.194:3213. The main LlmHost (ministral-3:14b)
+  // continues to serve the answer round.
+  utilityLlmHost: {
+    enabled: true,
+    baseUrl: 'ws://192.168.0.194:3213',
+    callerService: 'chat-orchestrator',
+    timeoutMs: 60000,
+    fallbackToMainOnError: true,
+  },
+
   // RAG Engine endpoint. The orchestrator uses the persistent WebSocket
   // stream so it can forward retrieval progress to connected chat clients
   // before final-answer inference starts.

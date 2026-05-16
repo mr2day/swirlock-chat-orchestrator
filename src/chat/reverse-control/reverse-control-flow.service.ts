@@ -17,6 +17,7 @@ import type {
 } from '../../llm-host/llm-host.service';
 import { LlmHostService } from '../../llm-host/llm-host.service';
 import { PromptBudgetService } from '../../llm-host/prompt-budget.service';
+import { UtilityLlmHostService } from '../../llm-host/utility-llm-host.service';
 import type {
   RagEvidence,
   RetrievalStreamEvent,
@@ -157,6 +158,7 @@ export class ReverseControlFlowService {
     private readonly capping: CappingService,
     private readonly fulfiller: CommandFulfillerService,
     private readonly dailyBriefing: DailyBriefingService,
+    private readonly utilityLlm: UtilityLlmHostService,
   ) {}
 
   async runTurn(input: RunTurnInput): Promise<TurnDoneEnvelope> {
@@ -226,21 +228,55 @@ export class ReverseControlFlowService {
       const ollama: Record<string, unknown> = { temperature: 0 };
       if (cap !== undefined) ollama.num_predict = cap;
 
-      const assessment = await this.llm.streamInfer({
-        correlationId: ctx.correlationId,
-        messages: assessmentMessages,
-        options: { responseFormat: 'text', thinking: false, ollama },
-        abortSignal: input.abortSignal,
-        onEvent: (evt) => {
-          if (evt.type === 'chunk' && evt.payload.text) {
-            onPhase?.({
-              type: 'token',
-              phase: 'assessment',
-              text: evt.payload.text,
+      // Route the classifier (assessment) round to the utility LLM
+      // host (smaller, faster, wider-context model on a separate
+      // machine) so it doesn't compete with the main answer model on
+      // the local GPU and so persona prose doesn't leak into search
+      // queries. On failure, fall back to the main LlmHost so the
+      // turn doesn't break.
+      const runAssessment = async (): Promise<typeof assessment> => {
+        if (this.utilityLlm.isEnabled()) {
+          try {
+            return await this.utilityLlm.streamInfer({
+              correlationId: `${ctx.correlationId}:classifier`,
+              messages: assessmentMessages,
+              options: { responseFormat: 'text', thinking: false, ollama },
+              abortSignal: input.abortSignal,
+              onEvent: (evt) => {
+                if (evt.type === 'chunk' && evt.payload.text) {
+                  onPhase?.({
+                    type: 'token',
+                    phase: 'assessment',
+                    text: evt.payload.text,
+                  });
+                }
+              },
             });
+          } catch (err) {
+            if (!this.utilityLlm.shouldFallbackOnError()) throw err;
+            const message = err instanceof Error ? err.message : String(err);
+            this.log.warn(
+              `Utility LLM Host failed for classifier (${message}); falling back to main LlmHost.`,
+            );
           }
-        },
-      });
+        }
+        return this.llm.streamInfer({
+          correlationId: ctx.correlationId,
+          messages: assessmentMessages,
+          options: { responseFormat: 'text', thinking: false, ollama },
+          abortSignal: input.abortSignal,
+          onEvent: (evt) => {
+            if (evt.type === 'chunk' && evt.payload.text) {
+              onPhase?.({
+                type: 'token',
+                phase: 'assessment',
+                text: evt.payload.text,
+              });
+            }
+          },
+        });
+      };
+      const assessment = await runAssessment();
 
       parsed = parseCommands(assessment.text);
       thinkingForAnswer = parsed.commands.has('THINKING');
