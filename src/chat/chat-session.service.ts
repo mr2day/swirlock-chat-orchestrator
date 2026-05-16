@@ -33,6 +33,7 @@ interface MessageRow {
   role: 'user' | 'assistant' | 'system';
   content: string;
   parts_json: string | null;
+  citations_json: string | null;
   created_at: string;
   seq: number;
 }
@@ -46,6 +47,12 @@ export interface SessionCreated {
 export interface PersistedImageRef {
   imageId: string;
   mimeType: string | null;
+}
+
+export interface PersistedCitation {
+  evidenceId: string;
+  sourceTitle: string;
+  sourceUrl?: string;
 }
 
 export interface SessionSnapshot {
@@ -68,6 +75,13 @@ export interface SessionSnapshot {
      * are no images.
      */
     images?: PersistedImageRef[];
+    /**
+     * Citations / source list attached to an assistant turn that ran
+     * SEARCH. Populated only for assistant-role messages that had
+     * sources. Empty (omitted) on user messages or turns with no
+     * retrieval.
+     */
+    citations?: PersistedCitation[];
   }>;
 }
 
@@ -154,7 +168,7 @@ export class ChatSessionService {
     const session = this.loadSessionRow(sessionId, authUserId);
     const messages = this.db.connection
       .prepare(
-        `SELECT id, session_id, turn_id, role, content, parts_json, created_at, seq
+        `SELECT id, session_id, turn_id, role, content, parts_json, citations_json, created_at, seq
            FROM messages WHERE session_id = ? ORDER BY seq ASC`,
       )
       .all(sessionId) as MessageRow[];
@@ -167,6 +181,7 @@ export class ChatSessionService {
       status: session.status,
       messages: messages.map((m) => {
         const images = this.extractImageRefsFromPartsJson(m.parts_json);
+        const citations = this.extractCitationsFromJson(m.citations_json);
         return {
           messageId: m.id,
           turnId: m.turn_id,
@@ -174,6 +189,7 @@ export class ChatSessionService {
           content: m.content,
           createdAt: m.created_at,
           ...(images ? { images } : {}),
+          ...(citations ? { citations } : {}),
         };
       }),
     };
@@ -223,6 +239,13 @@ export class ChatSessionService {
     userText: string;
     occurredAt: string;
     assistantText: string;
+    /**
+     * Citations the answer round produced (from SEARCH evidence).
+     * Stored on the assistant message's `citations_json` column so
+     * reopened sessions can re-render the "Sources" disclosure
+     * without needing the original turn.done payload.
+     */
+    citations?: PersistedCitation[];
   }): AppendedTurn {
     const turnId = args.turnId ?? randomUUID();
     const userMessageId = randomUUID();
@@ -261,16 +284,21 @@ export class ChatSessionService {
           nextSeq++,
         );
       assistantSeq = nextSeq;
+      const citationsJson =
+        args.citations && args.citations.length > 0
+          ? JSON.stringify(args.citations)
+          : null;
       this.db.connection
         .prepare(
-          `INSERT INTO messages (id, session_id, turn_id, role, content, parts_json, created_at, seq)
-           VALUES (?, ?, ?, 'assistant', ?, NULL, ?, ?)`,
+          `INSERT INTO messages (id, session_id, turn_id, role, content, parts_json, citations_json, created_at, seq)
+           VALUES (?, ?, ?, 'assistant', ?, NULL, ?, ?, ?)`,
         )
         .run(
           assistantMessageId,
           args.sessionId,
           turnId,
           args.assistantText,
+          citationsJson,
           createdAt,
           nextSeq++,
         );
@@ -367,6 +395,38 @@ export class ChatSessionService {
       throw new ForbiddenException('Session belongs to a different user');
     }
     return row;
+  }
+
+  private extractCitationsFromJson(
+    raw: string | null,
+  ): PersistedCitation[] | undefined {
+    if (!raw) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+    if (!Array.isArray(parsed)) return undefined;
+    const out: PersistedCitation[] = [];
+    for (const item of parsed) {
+      if (typeof item !== 'object' || item === null) continue;
+      const obj = item as {
+        evidenceId?: unknown;
+        sourceTitle?: unknown;
+        sourceUrl?: unknown;
+      };
+      if (typeof obj.evidenceId !== 'string' || !obj.evidenceId) continue;
+      if (typeof obj.sourceTitle !== 'string' || !obj.sourceTitle) continue;
+      out.push({
+        evidenceId: obj.evidenceId,
+        sourceTitle: obj.sourceTitle,
+        ...(typeof obj.sourceUrl === 'string' && obj.sourceUrl
+          ? { sourceUrl: obj.sourceUrl }
+          : {}),
+      });
+    }
+    return out.length > 0 ? out : undefined;
   }
 
   private extractImageRefsFromPartsJson(

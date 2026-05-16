@@ -380,6 +380,16 @@ export class ReverseControlFlowService {
         );
       }
 
+      // Compute citations BEFORE persisting so the assistant message
+      // row carries them in citations_json. Without this the "Sources"
+      // disclosure under each answer is lost when the session is
+      // reopened from the DB.
+      const citations = [...evidenceById.values()].map((ev) => ({
+        evidenceId: ev.evidenceId,
+        sourceTitle: ev.sourceTitle,
+        ...(ev.sourceUrl ? { sourceUrl: ev.sourceUrl } : {}),
+      }));
+
       const persisted = this.sessions.appendTurn({
         sessionId: ctx.sessionId,
         turnId: ctx.turnId,
@@ -387,6 +397,7 @@ export class ReverseControlFlowService {
         userText: ctx.userText,
         occurredAt: ctx.occurredAt,
         assistantText: finalResult.text,
+        citations,
       });
 
       this.fragmenter.notifyObserved({
@@ -397,12 +408,6 @@ export class ReverseControlFlowService {
       });
 
       const includeDiagnostics = input.dto.options?.includeDiagnostics === true;
-
-      const citations = [...evidenceById.values()].map((ev) => ({
-        evidenceId: ev.evidenceId,
-        sourceTitle: ev.sourceTitle,
-        ...(ev.sourceUrl ? { sourceUrl: ev.sourceUrl } : {}),
-      }));
 
       return {
         sessionId: ctx.sessionId,

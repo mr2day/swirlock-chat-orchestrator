@@ -63,6 +63,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     this.ensureSessionsTokenCounter();
     this.ensureSessionsPersonaId();
     this.ensureMessagesHallucinationIndex();
+    this.ensureMessagesCitations();
     this.connection.exec(`
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
@@ -310,6 +311,24 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       `ALTER TABLE messages ADD COLUMN hallucination_index INTEGER;`,
     );
     this.log.log('Added column messages.hallucination_index');
+  }
+
+  /**
+   * Citations / source list attached to the assistant message of a
+   * turn. Stored as a JSON array of `{ evidenceId, sourceTitle,
+   * sourceUrl? }`. NULL on legacy rows + on assistant messages where
+   * no SEARCH ran. Surfaced back on `session.snapshot` so reopened
+   * conversations show their "Sources" disclosure under each answer.
+   */
+  private ensureMessagesCitations(): void {
+    const cols = this.connection
+      .prepare(`PRAGMA table_info('messages')`)
+      .all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === 'citations_json')) return;
+    this.connection.exec(
+      `ALTER TABLE messages ADD COLUMN citations_json TEXT;`,
+    );
+    this.log.log('Added column messages.citations_json');
   }
 
   private renameLegacyAgentEvents(): void {
