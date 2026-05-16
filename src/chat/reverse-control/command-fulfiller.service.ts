@@ -96,7 +96,7 @@ export class CommandFulfillerService {
         abortSignal: ctx.abortSignal,
       });
 
-      if (result.evidence.length === 0 && !result.preparedPrompt) {
+      if (result.evidence.length === 0) {
         return {
           command: label,
           value: `Search query "${query}" returned no results.`,
@@ -104,34 +104,19 @@ export class CommandFulfillerService {
         };
       }
 
-      // Preferred path: the RAG Engine's utility-LLM distillation
-      // returned a prose answer-aid built from the uncapped extracted
-      // page text. Hand it straight to the answer round, wrapped so the
-      // main LLM knows where it came from.
-      if (result.preparedPrompt) {
-        return {
-          command: label,
-          value: `<search_results query="${query.replace(/"/g, '\\"')}">\n${result.preparedPrompt}\n</search_results>`,
-          evidence: result.evidence,
-        };
-      }
-
-      // Fallback (utility LLM unreachable / distillation skipped):
-      // build a [Source N] snippet block from the truncated evidence
-      // chunks. URLs are omitted on purpose — the main model was
-      // observed lifting date slugs out of URL paths in preference to
-      // the article body.
-      const lines: string[] = [
-        `Search query: "${query}" — ${result.evidence.length} result${result.evidence.length === 1 ? '' : 's'}:`,
-      ];
-      result.evidence.slice(0, 15).forEach((ev, idx) => {
-        const snippet = ev.snippet ? `: ${ev.snippet}` : '';
-        lines.push(`- [Source ${idx + 1}] ${ev.sourceTitle}${snippet}`);
-      });
+      // Single-pass pattern: feed the top Exa result's full extracted
+      // text directly to the answer round. No second-LLM distillation,
+      // no per-source clipping. The body text comes through uncapped
+      // (up to Exa's own ceiling, currently text.maxCharacters=24000).
+      const top = result.evidence[0];
+      const body = top.snippet?.trim() ?? '';
+      const value = body
+        ? `Search query: "${query}" — top result:\n[Source 1] ${top.sourceTitle}\n${body}`
+        : `Search query: "${query}" — top result: ${top.sourceTitle} (no extractable body)`;
       return {
         command: label,
-        value: lines.join('\n'),
-        evidence: result.evidence,
+        value,
+        evidence: [top],
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
