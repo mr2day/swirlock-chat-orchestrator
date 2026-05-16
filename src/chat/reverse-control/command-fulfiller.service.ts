@@ -60,8 +60,20 @@ export class CommandFulfillerService {
     switch (command) {
       case 'LOCATION':
       case 'DATE_TIME':
+        return this.fulfillSearch(
+          command,
+          parsed.searchPrompt ? [parsed.searchPrompt] : [],
+          ctx,
+          knownLocation,
+        );
+
       case 'SEARCH':
-        return this.fulfillSearch(command, parsed.searchPrompt, ctx, knownLocation);
+        return this.fulfillSearch(
+          command,
+          parsed.searchPrompts ?? (parsed.searchPrompt ? [parsed.searchPrompt] : []),
+          ctx,
+          knownLocation,
+        );
 
       case 'THINKING':
       case 'DIRECT':
@@ -71,74 +83,128 @@ export class CommandFulfillerService {
 
   private async fulfillSearch(
     label: CommandKind,
-    searchPrompt: string | undefined,
+    searchPrompts: string[],
     ctx: FulfillContext,
     knownLocation: UserLocation | undefined,
   ): Promise<FulfillmentResult> {
-    const query = searchPrompt?.trim() || ctx.userText.trim();
-    if (!searchPrompt) {
+    const queries =
+      searchPrompts.map((p) => p.trim()).filter(Boolean).length > 0
+        ? searchPrompts.map((p) => p.trim()).filter(Boolean)
+        : [ctx.userText.trim()];
+    if (searchPrompts.length === 0) {
       this.log.warn(
-        `${label} command emitted without a [search_prompt="..."] tag; falling back to userText.`,
+        `${label} command emitted without any [search_prompt="..."] tag; falling back to userText.`,
       );
     }
 
     try {
-      const result = await this.rag.retrieve({
-        correlationId: ctx.correlationId,
-        sessionId: ctx.sessionId,
-        userText: ctx.userText,
-        parts: [{ type: 'text', text: query }],
-        resolvedQueryText: query,
-        freshness: this.cfg.rag.freshness,
-        allowedModes: [...this.cfg.rag.allowedModes],
-        ...(knownLocation ? { userLocation: knownLocation } : {}),
-        onStreamEvent: ctx.onRetrievalStreamEvent,
-        abortSignal: ctx.abortSignal,
-      });
+      // Parallel fan-out: fire one RAG retrieve per query angle. The
+      // RAG Engine handles each request concurrently. We merge by URL
+      // afterwards, keeping the highest-ranked occurrence of each
+      // source across the fan-out. Result-order is preserved from the
+      // first query that surfaced each URL — so the lead source the
+      // answer model sees is whatever the first query's top hit was.
+      const fanout = await Promise.all(
+        queries.map((q) =>
+          this.rag
+            .retrieve({
+              correlationId: ctx.correlationId,
+              sessionId: ctx.sessionId,
+              userText: ctx.userText,
+              parts: [{ type: 'text', text: q }],
+              resolvedQueryText: q,
+              freshness: this.cfg.rag.freshness,
+              allowedModes: [...this.cfg.rag.allowedModes],
+              ...(knownLocation ? { userLocation: knownLocation } : {}),
+              onStreamEvent: ctx.onRetrievalStreamEvent,
+              abortSignal: ctx.abortSignal,
+            })
+            .then((res) => ({ query: q, evidence: res.evidence }))
+            .catch((err: Error) => {
+              this.log.warn(
+                `${label} fan-out leg "${q}" failed: ${err.message}`,
+              );
+              return { query: q, evidence: [] };
+            }),
+        ),
+      );
 
-      if (result.evidence.length === 0) {
+      const merged = this.dedupeAcrossFanout(fanout);
+
+      if (merged.length === 0) {
+        const joined = queries.map((q) => `"${q}"`).join(' / ');
         return {
           command: label,
-          value: `Search query "${query}" returned no results.`,
+          value: `Search ${joined} returned no results.`,
           evidence: [],
         };
       }
 
       // Source 1 gets its full body in the prompt. Sources 2..N ride
-      // along as title+URL only — the model can reference them and
-      // point the user to the citation panel if their title suggests
-      // they answer something Source 1 missed. Cheap (~400 tokens for
-      // 9 entries) but lets the model break out of single-source
-      // tunnel vision when the top result is the wrong page.
-      const top = result.evidence[0];
+      // along as title+URL only so the model can spot a missed angle
+      // and tell the user to open the citation panel.
+      const top = merged[0];
       const body = top.snippet?.trim() ?? '';
-      const others = result.evidence.slice(1);
-      const othersBlock = others.length > 0
-        ? '\n\nOther sources also returned for this query (title + URL only; full body not loaded into this prompt — the user can open them from the citation panel):\n' +
-          others
-            .map(
-              (ev, i) =>
-                `- [Source ${i + 2}] ${ev.sourceTitle} — ${ev.sourceUrl ?? '(no url)'}`,
-            )
-            .join('\n')
-        : '';
+      const others = merged.slice(1);
+      const othersBlock =
+        others.length > 0
+          ? '\n\nOther sources also returned across this fan-out (title + URL only; full body not loaded — the user can open them from the citation panel):\n' +
+            others
+              .map(
+                (ev, i) =>
+                  `- [Source ${i + 2}] ${ev.sourceTitle} — ${ev.sourceUrl ?? '(no url)'}`,
+              )
+              .join('\n')
+          : '';
       const groundingRule =
         'Be yourself in how you answer — voice, opinions, asides, recommendations are all welcome. But factual claims about the world (times, names, what is airing, what happened) must come from what is visibly present in Source 1 above. If Source 1 does not cover the specific thing the user is asking about, say so plainly — do not promote the nearest visible entry in Source 1 as the answer, and do not invent details to bridge a gap. Truncation or absence in Source 1 is not evidence about the real world. If one of the other listed sources has a title that looks directly relevant to what the user asked, tell the user that source is available in the citation panel — do not fabricate the contents of sources 2 onward, since you only have their titles and URLs, not their text.';
+
+      const queryLabel = queries.length === 1
+        ? `Search query: "${queries[0]}"`
+        : `Search fan-out (${queries.length} parallel queries): ${queries.map((q) => `"${q}"`).join(', ')}`;
       const value = body
-        ? `Search query: "${query}" — top result:\n[Source 1] ${top.sourceTitle}\n${body}${othersBlock}\n\n${groundingRule}`
-        : `Search query: "${query}" — top result: ${top.sourceTitle} (no extractable body)${othersBlock}\n\n${groundingRule}`;
+        ? `${queryLabel} — top result:\n[Source 1] ${top.sourceTitle}\n${body}${othersBlock}\n\n${groundingRule}`
+        : `${queryLabel} — top result: ${top.sourceTitle} (no extractable body)${othersBlock}\n\n${groundingRule}`;
       return {
         command: label,
         value,
-        evidence: result.evidence,
+        evidence: merged,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.log.warn(`${label} search fulfillment failed: ${message}`);
       return {
         command: label,
-        value: `Search for "${query}" failed: ${message}`,
+        value: `Search for "${queries.join(' / ')}" failed: ${message}`,
       };
     }
+  }
+
+  /**
+   * Merge evidence arrays from a parallel fan-out, deduping by URL.
+   * Preserves the order in which URLs first appeared across the
+   * fan-out legs (so leg 0's top hit becomes Source 1, etc.).
+   */
+  private dedupeAcrossFanout(
+    fanout: Array<{ query: string; evidence: RagEvidence[] }>,
+  ): RagEvidence[] {
+    const seen = new Set<string>();
+    const merged: RagEvidence[] = [];
+    // Interleave: take leg 0's #1, leg 1's #1, leg 2's #1, then leg 0's #2,
+    // leg 1's #2, etc. So each leg contributes its best hits to the top
+    // of the merged list — better than concatenating "all of leg 0, then
+    // all of leg 1" which would let one leg's tail outrank another's head.
+    const maxLen = Math.max(...fanout.map((f) => f.evidence.length), 0);
+    for (let rank = 0; rank < maxLen; rank += 1) {
+      for (const leg of fanout) {
+        const ev = leg.evidence[rank];
+        if (!ev) continue;
+        const key = ev.sourceUrl ?? `__noUrl__::${ev.sourceTitle}::${ev.evidenceId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(ev);
+      }
+    }
+    return merged;
   }
 }

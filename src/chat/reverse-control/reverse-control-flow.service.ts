@@ -607,17 +607,26 @@ export class ReverseControlFlowService {
       return 'No command parsed; treating as DIRECT';
     }
     const list = [...parsed.commands].join(', ');
-    if (parsed.searchPrompt) {
-      return `Commands: ${list}; search_prompt="${parsed.searchPrompt}"`;
+    const prompts = parsed.searchPrompts ?? (parsed.searchPrompt ? [parsed.searchPrompt] : []);
+    if (prompts.length > 1) {
+      return `Commands: ${list}; search_prompts=[${prompts.map((p) => `"${p}"`).join(', ')}]`;
+    }
+    if (prompts.length === 1) {
+      return `Commands: ${list}; search_prompt="${prompts[0]}"`;
     }
     return `Commands: ${list}`;
   }
 
   private startedLabelFor(cmd: CommandKind, parsed: ParsedCommands): string {
     if (cmd === 'SEARCH') {
-      return parsed.searchPrompt
-        ? `Searching: "${parsed.searchPrompt}"`
-        : 'Searching';
+      const prompts = parsed.searchPrompts ?? (parsed.searchPrompt ? [parsed.searchPrompt] : []);
+      if (prompts.length > 1) {
+        return `Searching (${prompts.length} parallel queries): ${prompts.map((p) => `"${p}"`).join(', ')}`;
+      }
+      if (prompts.length === 1) {
+        return `Searching: "${prompts[0]}"`;
+      }
+      return 'Searching';
     }
     if (cmd === 'LOCATION') return 'Resolving location';
     if (cmd === 'DATE_TIME') return 'Looking up date and time';

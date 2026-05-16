@@ -4,13 +4,15 @@
  * Recognised forms:
  *   [command="DIRECT"]
  *   [command="SEARCH"][search_prompt="latest news Bucharest"]
+ *   [command="SEARCH"][search_prompt="A"][search_prompt="B"][search_prompt="C"]
  *   [command="LOCATION, DATE_TIME, THINKING, SEARCH"][search_prompt="..."]
  *   [__meta_section__][command="..."][/__meta_section__]   (wrapping is optional)
  *
  * The parser is tolerant: it scans the entire response for `[command="..."]`
- * occurrences (multiple are allowed and unioned) and one optional
- * `[search_prompt="..."]` tag. Names inside `command="..."` are split on
- * commas and case-folded to upper.
+ * occurrences (multiple are allowed and unioned) and ALL `[search_prompt="..."]`
+ * tags (when more than one is present, they become a parallel fan-out for the
+ * SEARCH command). Names inside `command="..."` are split on commas and
+ * case-folded to upper.
  */
 
 export type CommandKind =
@@ -30,15 +32,16 @@ const KNOWN_COMMANDS: ReadonlySet<CommandKind> = new Set([
 
 export interface ParsedCommands {
   commands: Set<CommandKind>;
+  /** Convenience: the first search prompt, kept for callers that
+   *  still use single-query SEARCH (LOCATION / DATE_TIME). */
   searchPrompt?: string;
+  /** All search prompts in order. Used by SEARCH for parallel fan-out
+   *  across multiple query angles. */
+  searchPrompts?: string[];
 }
 
-// Tolerant: match `[command="..."` regardless of what follows (so both
-// `[command="SEARCH"]` and `[command="LOCATION", search_prompt="..."]`
-// — inline-attribute form — are picked up). `[search_prompt="..."]`
-// is matched the same way.
 const COMMAND_RE = /\[command\s*=\s*"([^"]*)"/giu;
-const SEARCH_PROMPT_RE = /\[search_prompt\s*=\s*"([^"]*)"/iu;
+const SEARCH_PROMPT_RE = /\[search_prompt\s*=\s*"([^"]*)"/giu;
 
 export function parseCommands(text: string): ParsedCommands {
   const commands = new Set<CommandKind>();
@@ -52,7 +55,19 @@ export function parseCommands(text: string): ParsedCommands {
       }
     }
   }
-  const sp = SEARCH_PROMPT_RE.exec(text);
-  const searchPrompt = sp && sp[1].trim() ? sp[1].trim() : undefined;
-  return searchPrompt ? { commands, searchPrompt } : { commands };
+  const searchPrompts: string[] = [];
+  SEARCH_PROMPT_RE.lastIndex = 0;
+  let sp: RegExpExecArray | null;
+  while ((sp = SEARCH_PROMPT_RE.exec(text)) !== null) {
+    const value = sp[1].trim();
+    if (value) searchPrompts.push(value);
+  }
+  if (searchPrompts.length === 0) {
+    return { commands };
+  }
+  return {
+    commands,
+    searchPrompt: searchPrompts[0],
+    searchPrompts,
+  };
 }
