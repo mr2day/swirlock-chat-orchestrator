@@ -78,20 +78,64 @@ export class DailyBriefingService {
   }
 
   private dateKey(dateTime: string): string {
-    // Best-effort YYYY-MM-DD; if dateTime is human-readable like
-    // "17 May 2026, 01:45" we fall back to splitting on common
-    // separators. Cache key correctness matters more than format
-    // precision here.
-    const parsed = Date.parse(dateTime);
-    if (!Number.isNaN(parsed)) return new Date(parsed).toISOString().slice(0, 10);
-    return dateTime.slice(0, 16);
+    // dateTime arrives as "17 May 2026, 02:01" (formatted by
+    // reverse-control-flow.formatDateTime in the user's LOCAL
+    // wall-clock time). Parsing it via Date.parse and serialising
+    // back through toISOString reinterprets it as UTC and shifts
+    // the date for any user east of UTC after the cutover — Romania
+    // at 02:01 local is 23:01 UTC the day before, so the cache
+    // bucketed "today" as yesterday and the briefing fetched stale
+    // news. Pull the date from the formatted string directly.
+    const m = /^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})/.exec(dateTime.trim());
+    if (m) {
+      const day = m[1].padStart(2, '0');
+      const monthName = m[2].toLowerCase();
+      const months: Record<string, string> = {
+        jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+        jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
+        january: '01', february: '02', march: '03', april: '04', june: '06',
+        july: '07', august: '08', september: '09', october: '10',
+        november: '11', december: '12',
+      };
+      const month = months[monthName.slice(0, 3)] ?? months[monthName];
+      if (month) return `${m[3]}-${month}-${day}`;
+    }
+    return dateTime.slice(0, 10);
   }
 
   private detectLanguageHint(text: string): string {
+    // Diacritics first (highest-confidence signal).
     if (/[ăâîșțĂÂÎȘȚ]/.test(text)) return 'ro';
     if (/[àèéìòù]/.test(text)) return 'it';
     if (/[ñáéíóú¡¿]/.test(text)) return 'es';
     if (/[äöüß]/.test(text)) return 'de';
+    // Fallback: function-word heuristic. Many users type without
+    // diacritics (especially on mobile / English keyboards), so we
+    // catch common stop-word patterns. Test for full-word matches
+    // (word boundaries) to avoid false positives.
+    const lower = text.toLowerCase();
+    const has = (word: string): boolean =>
+      new RegExp(`\\b${word}\\b`).test(lower);
+    let roHits = 0, itHits = 0, esHits = 0, deHits = 0;
+    for (const w of ['este', 'sunt', 'asta', 'acum', 'azi', 'aici', 'pentru', 'ce', 'cum', 'cand', 'când', 'unde', 'momentul', 'foarte']) {
+      if (has(w)) roHits++;
+    }
+    for (const w of ['cosa', 'sono', 'questo', 'questa', 'adesso', 'oggi', 'qui', 'per', 'che', 'come', 'quando', 'dove', 'molto', 'allora']) {
+      if (has(w)) itHits++;
+    }
+    for (const w of ['qué', 'que', 'son', 'esto', 'esta', 'ahora', 'hoy', 'aquí', 'para', 'cómo', 'cuándo', 'dónde', 'muy']) {
+      if (has(w)) esHits++;
+    }
+    for (const w of ['ist', 'sind', 'das', 'jetzt', 'heute', 'hier', 'für', 'wie', 'wann', 'wo', 'sehr']) {
+      if (has(w)) deHits++;
+    }
+    const best = Math.max(roHits, itHits, esHits, deHits);
+    if (best >= 2) {
+      if (roHits === best) return 'ro';
+      if (itHits === best) return 'it';
+      if (esHits === best) return 'es';
+      if (deHits === best) return 'de';
+    }
     return 'en';
   }
 
