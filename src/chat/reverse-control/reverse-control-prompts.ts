@@ -158,42 +158,59 @@ const CONSENSUS_RULE = [
  * ran 3.5K-4.5K tokens, which is ~10-30s of prompt-processing
  * latency on a 14B local model before any output. The slim version
  * brings the classifier turn back under 1-2s.
+ *
+ * `thinkingSupported` gates the THINKING command bullet: ministral-3:14b
+ * does not support chain-of-thought, so advertising the command would
+ * just waste tokens and risk the classifier emitting an unhonorable tag.
  */
-const CLASSIFIER_INSTRUCTIONS = [
-  'You are a routing classifier for a chatbot. Output ONLY command tag(s) — no prose, no persona voice, no explanation.',
-  '',
-  'Wrap your output in [__meta_section__]...[/__meta_section__].',
-  '',
-  'Available commands:',
-  '- [command="SEARCH"][search_prompt="A"][search_prompt="B"][search_prompt="C"] — web search. Use for factual / current-events / "right now" questions. Emit 1-3 [search_prompt] tags; multiple tags fan out in parallel. Each prompt is a complete standalone query in the user\'s language.',
-  '- [command="THINKING"] — enable chain-of-thought for the answer round. Use for complex multi-step reasoning.',
-  '- [command="DIRECT"] — answer directly, no search. Use for chitchat, greetings, opinions, self/persona questions, anything introspective.',
-  '- [command="LOCATION"][search_prompt="..."] — look up a place OTHER than the user\'s own (the user\'s location is already known).',
-  '- [command="DATE_TIME"][search_prompt="..."] — look up date/time for somewhere/something OTHER than the user (different timezone, historical event).',
-  '',
-  'Chain commands as [command="THINKING, SEARCH"][search_prompt="..."].',
-  '',
-  'Language rule: detect the language of the user\'s last message and write any [search_prompt] in that exact language. Do NOT add language flavour, asides, or persona voice — output only tags.',
-  '',
-  'Date/location: the user\'s dateTime and location (when known) are pre-injected in the user message and do NOT require LOCATION/DATE_TIME commands. Include the date in [search_prompt] only when the answer truly depends on it (today\'s news, opening hours, what is airing now); skip it for biographical / historical / scientific / general factual queries.',
-].join('\n');
+function classifierInstructions(thinkingSupported: boolean): string {
+  const commands = [
+    '- [command="SEARCH"][search_prompt="A"][search_prompt="B"][search_prompt="C"] — web search. Use for factual / current-events / "right now" questions. Emit 1-3 [search_prompt] tags; multiple tags fan out in parallel. Each prompt is a complete standalone query in the user\'s language.',
+    ...(thinkingSupported
+      ? [
+          '- [command="THINKING"] — enable chain-of-thought for the answer round. Use for complex multi-step reasoning.',
+        ]
+      : []),
+    '- [command="DIRECT"] — answer directly, no search. Use for chitchat, greetings, opinions, self/persona questions, anything introspective.',
+    '- [command="LOCATION"][search_prompt="..."] — look up a place OTHER than the user\'s own (the user\'s location is already known).',
+    '- [command="DATE_TIME"][search_prompt="..."] — look up date/time for somewhere/something OTHER than the user (different timezone, historical event).',
+  ];
+  const chaining = thinkingSupported
+    ? 'Chain commands as [command="THINKING, SEARCH"][search_prompt="..."].'
+    : 'Chain commands as [command="SEARCH, LOCATION"][search_prompt="..."] when more than one applies.';
+  return [
+    'You are a routing classifier for a chatbot. Output ONLY command tag(s) — no prose, no persona voice, no explanation.',
+    '',
+    'Wrap your output in [__meta_section__]...[/__meta_section__].',
+    '',
+    'Available commands:',
+    ...commands,
+    '',
+    chaining,
+    '',
+    "Language rule: detect the language of the user's last message and write any [search_prompt] in that exact language. Do NOT add language flavour, asides, or persona voice — output only tags.",
+    '',
+    "Date/location: the user's dateTime and location (when known) are pre-injected in the user message and do NOT require LOCATION/DATE_TIME commands. Include the date in [search_prompt] only when the answer truly depends on it (today's news, opening hours, what is airing now); skip it for biographical / historical / scientific / general factual queries.",
+  ].join('\n');
+}
 
 export function buildAssessmentPrompt(args: {
   userText: string;
   cityCountry: string | null;
   dateTime: string;
   /**
-   * Compact pronoun-resolution hint. Caller should pass at most the
-   * last 1-2 short user lines — NOT full assistant prose. Anything
-   * heavier turns into 500-2000 tokens of prompt bloat with no
-   * decision-quality return.
+   * Compact pronoun-resolution hint built by the caller from the last
+   * 1-2 turn pairs, token-budgeted. See ReverseControlFlowService.
    */
   recentHistoryBlock: string | null;
+  /** Whether the answer model supports chain-of-thought. Gates the
+   *  THINKING command bullet. */
+  thinkingSupported: boolean;
 }): LlmMessage[] {
   // Classifier prompt is deliberately slim. No persona, no lessons,
   // no briefing, no answer-round rules. The model has one job: emit
-  // command tags. See CLASSIFIER_INSTRUCTIONS for the full spec.
-  const systemContent = CLASSIFIER_INSTRUCTIONS;
+  // command tags. See classifierInstructions() for the full spec.
+  const systemContent = classifierInstructions(args.thinkingSupported);
 
   const userParts: string[] = [
     '[__meta_section__]',

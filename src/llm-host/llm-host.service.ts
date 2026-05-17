@@ -54,8 +54,25 @@ interface RawLlmEnvelope {
 export class LlmHostService implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(LlmHostService.name);
   private client?: PersistentModelHostSocket;
+  /**
+   * Last successful model.status response, cached so per-turn callers
+   * can check `thinkingSupported` etc. synchronously without paying
+   * for a fresh round-trip every turn. Populated at boot via
+   * onModuleInit and refreshed on each getModelInfo() call.
+   */
+  private cachedModelInfo: LlmModelInfo | null = null;
 
   constructor(@Inject(SERVICE_CONFIG) private readonly cfg: ServiceConfig) {}
+
+  /**
+   * Synchronous accessor for the cached model.status response.
+   * Returns null until the first successful getModelInfo() resolves.
+   * Callers should treat null as "thinking not supported" / "unknown
+   * model" rather than retry on every turn.
+   */
+  getCachedModelInfo(): LlmModelInfo | null {
+    return this.cachedModelInfo;
+  }
 
   onModuleInit(): void {
     void this.modelHost()
@@ -163,6 +180,7 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
         reject(err);
       });
     });
+    this.cachedModelInfo = info;
     this.log.log(
       `LLM model resolved: ${info.modelId} (thinkingSupported=${info.thinkingSupported}` +
         (info.contextWindow

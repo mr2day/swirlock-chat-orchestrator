@@ -178,12 +178,17 @@ export class ReverseControlFlowService {
       // experience lessons, no events briefing. The classifier's job
       // is to emit command tags, and bigger prompts mean more
       // prompt-processing latency on the 14B local model. History
-      // block is user-only and capped — see renderClassifierHistoryBlock.
+      // block is token-budgeted — see renderClassifierHistoryBlock.
+      // THINKING bullet is gated on whether the answer model actually
+      // supports chain-of-thought.
+      const thinkingSupported =
+        this.llm.getCachedModelInfo()?.thinkingSupported ?? false;
       const assessmentMessages = buildAssessmentPrompt({
         userText: ctx.userText,
         cityCountry,
         dateTime,
         recentHistoryBlock: this.renderClassifierHistoryBlock(ctx.history),
+        thinkingSupported,
       });
 
       onPhase?.({
@@ -550,21 +555,58 @@ export class ReverseControlFlowService {
   }
 
   /**
-   * Slim history block for the classifier: ONLY the last two user
-   * messages (no assistant prose), each trimmed to a short snippet.
-   * Sole purpose is pronoun / referent resolution — "what about him?"
-   * needs the prior "him" reference. The full assistant reply in
-   * persona prose (~600 tokens per assistant turn) is dead weight
-   * for the classifier's decision and used to dominate the prompt.
+   * Pronoun-resolution context for the classifier: last 2 turn-pairs
+   * (both roles), token-budgeted. Sole purpose is to let the
+   * classifier resolve references like "him" / "the second one" /
+   * "yes" — which can anchor on EITHER what the user said earlier
+   * OR what the assistant just said. User-only would lose those.
+   *
+   * Two budgets in tokens (not chars) because tokens are what the
+   * model actually consumes:
+   *   - PER_MSG: 75 tokens. Truncates each individual message so a
+   *     long assistant reply in persona prose doesn't blow the budget.
+   *   - TOTAL:   250 tokens. Walks newest→oldest, stops when adding
+   *     the next message would overflow.
    */
   private renderClassifierHistoryBlock(
     history: ConversationMessage[],
   ): string | null {
-    const userMsgs = history.filter((m) => m.role === 'user').slice(-2);
-    if (userMsgs.length === 0) return null;
-    const truncate = (s: string): string =>
-      s.length > 200 ? `${s.slice(0, 197)}...` : s;
-    return userMsgs.map((m) => `User: ${truncate(m.content)}`).join('\n');
+    const PER_MSG_TOKEN_CAP = 75;
+    const TOTAL_TOKEN_BUDGET = 250;
+    const eligible = history
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .slice(-4); // up to 2 turn-pairs
+    if (eligible.length === 0) return null;
+
+    const truncated = eligible.map((m) => {
+      const label = m.role === 'user' ? 'User' : 'You';
+      const cap = label.length + 2; // "User: " or "You: " overhead
+      const allowanceTokens = PER_MSG_TOKEN_CAP;
+      // Reverse the estimate to budget chars per message.
+      const allowanceChars = Math.floor(allowanceTokens * 3.5) - cap;
+      const body =
+        m.content.length > allowanceChars
+          ? `${m.content.slice(0, allowanceChars - 3).trimEnd()}...`
+          : m.content;
+      const line = `${label}: ${body}`;
+      return { line, tokens: this.estimateTokens(line) };
+    });
+
+    const picked: string[] = [];
+    let running = 0;
+    for (let i = truncated.length - 1; i >= 0; i -= 1) {
+      const { line, tokens } = truncated[i];
+      if (picked.length > 0 && running + tokens > TOTAL_TOKEN_BUDGET) break;
+      picked.unshift(line);
+      running += tokens;
+    }
+    return picked.length > 0 ? picked.join('\n') : null;
+  }
+
+  /** ~3.5 chars/token heuristic for the en+ro mix. Cheap enough to
+   *  inline; precise enough for budget walks. */
+  private estimateTokens(text: string): number {
+    return Math.ceil(text.length / 3.5);
   }
 
   private summariseParsed(parsed: ParsedCommands): string {
