@@ -38,10 +38,18 @@ export interface ParsedCommands {
   /** All search prompts in order. Used by SEARCH for parallel fan-out
    *  across multiple query angles. */
   searchPrompts?: string[];
+  /** Discriminative keywords emitted by the classifier alongside a
+   *  SEARCH command. The fulfiller uses these to deterministically
+   *  filter retrieved snippets — only snippets whose prose contains
+   *  at least one keyword (case-insensitive substring) are forwarded
+   *  to the answer round. Comma-separated inside a [keywords="..."]
+   *  tag; multiple tags are concatenated. */
+  keywords?: string[];
 }
 
 const COMMAND_RE = /\[command\s*=\s*"([^"]*)"/giu;
 const SEARCH_PROMPT_RE = /\[search_prompt\s*=\s*"([^"]*)"/giu;
+const KEYWORDS_RE = /\[keywords\s*=\s*"([^"]*)"/giu;
 
 export function parseCommands(text: string): ParsedCommands {
   const commands = new Set<CommandKind>();
@@ -62,12 +70,20 @@ export function parseCommands(text: string): ParsedCommands {
     const value = sp[1].trim();
     if (value) searchPrompts.push(value);
   }
-  if (searchPrompts.length === 0) {
-    return { commands };
+  const keywords: string[] = [];
+  KEYWORDS_RE.lastIndex = 0;
+  let kw: RegExpExecArray | null;
+  while ((kw = KEYWORDS_RE.exec(text)) !== null) {
+    for (const raw of kw[1].split(',')) {
+      const value = raw.trim();
+      if (value) keywords.push(value);
+    }
   }
-  return {
-    commands,
-    searchPrompt: searchPrompts[0],
-    searchPrompts,
-  };
+  const out: ParsedCommands = { commands };
+  if (searchPrompts.length > 0) {
+    out.searchPrompt = searchPrompts[0];
+    out.searchPrompts = searchPrompts;
+  }
+  if (keywords.length > 0) out.keywords = keywords;
+  return out;
 }

@@ -165,7 +165,7 @@ const CONSENSUS_RULE = [
  */
 function classifierInstructions(thinkingSupported: boolean): string {
   const commands = [
-    '- [command="SEARCH"][search_prompt="A"][search_prompt="B"][search_prompt="C"] — web search. Use for factual / current-events / "right now" questions. Emit 1-3 [search_prompt] tags; multiple tags fan out in parallel. Each prompt is a complete standalone query in the user\'s language.',
+    '- [command="SEARCH"][search_prompt="A"][search_prompt="B"][search_prompt="C"][keywords="word1, word2, word3"] — web search. Use for factual / current-events / "right now" questions. Emit 1-3 [search_prompt] tags; multiple tags fan out in parallel. Each prompt is a complete standalone query in the user\'s language. Alongside SEARCH you MUST also emit ONE [keywords="..."] tag with 3-6 comma-separated discriminative words in the same language as the prompts (names, places, entities, technical terms — NOT stopwords). The orchestrator deterministically drops any retrieved snippet that contains none of these keywords, so pick words you really expect to appear in an on-topic result. If even one keyword shows up in a snippet, the snippet is kept.',
     ...(thinkingSupported
       ? [
           '- [command="THINKING"] — enable chain-of-thought for the answer round. Use for complex multi-step reasoning.',

@@ -62,6 +62,7 @@ export class CommandFulfillerService {
       case 'DATE_TIME':
         return this.fulfillSearch(
           command,
+          parsed,
           parsed.searchPrompt ? [parsed.searchPrompt] : [],
           ctx,
           knownLocation,
@@ -70,6 +71,7 @@ export class CommandFulfillerService {
       case 'SEARCH':
         return this.fulfillSearch(
           command,
+          parsed,
           parsed.searchPrompts ?? (parsed.searchPrompt ? [parsed.searchPrompt] : []),
           ctx,
           knownLocation,
@@ -83,6 +85,7 @@ export class CommandFulfillerService {
 
   private async fulfillSearch(
     label: CommandKind,
+    parsed: ParsedCommands,
     searchPrompts: string[],
     ctx: FulfillContext,
     knownLocation: UserLocation | undefined,
@@ -146,72 +149,57 @@ export class CommandFulfillerService {
       const merged = this.dedupeAcrossFanout(fanout);
 
       if (merged.length === 0) {
-        const joined = queries.map((q) => `"${q}"`).join(' / ');
         return {
           command: label,
-          value: `Search ${joined} returned no results.`,
+          value: 'Search returned no results.',
           evidence: [],
         };
       }
 
-      // Feed the top BODY_SOURCE_COUNT sources' full bodies to the
-      // answer round (capped at PER_SOURCE_BODY_CAP chars each so the
-      // total stays inside ministral's ~26K prompt budget). Sources
-      // beyond that still ride along as title+URL only. Motivating
-      // incident: TVR1/Eurovision turn — the Eurovision-Final entry
-      // sat in the BODY of Source 3 ("Program TVR 1 16.05.2026"),
-      // not in Source 1's body or any source's title. Feeding only
-      // Source 1's body blinded the model to it.
-      const BODY_SOURCE_COUNT = 5;
-      const PER_SOURCE_BODY_CAP = 10000;
-      const bodied = merged.slice(0, BODY_SOURCE_COUNT);
-      const titleOnly = merged.slice(BODY_SOURCE_COUNT);
+      // Deterministic keyword filter: the classifier emits
+      // [keywords="..."] alongside SEARCH. We keep only snippets
+      // whose stripped prose contains at least one keyword
+      // (case-insensitive substring). The model never sees titles
+      // or URLs — only the kept prose, wrapped in <result>.
+      const keywords = parsed.keywords ?? [];
+      if (keywords.length === 0) {
+        this.log.warn(
+          `${label} fulfilled without [keywords="..."]; the keyword filter is a no-op for this turn.`,
+        );
+      }
 
-      const bodiedBlocks = bodied.map((ev, i) => {
-        const raw = (ev.snippet ?? '').trim();
+      const PER_RESULT_CAP = 10000;
+      const kept: Array<{ ev: RagEvidence; prose: string }> = [];
+      for (const ev of merged) {
+        const prose = this.toProse(ev.snippet ?? '');
+        if (!prose) continue;
+        if (keywords.length > 0 && !this.matchesAnyKeyword(prose, keywords)) {
+          continue;
+        }
         const capped =
-          raw.length <= PER_SOURCE_BODY_CAP
-            ? raw
-            : `${raw.slice(0, PER_SOURCE_BODY_CAP - 3).trimEnd()}...`;
-        const header = `[Source ${i + 1}] ${ev.sourceTitle}`;
-        return capped ? `${header}\n${capped}` : `${header} (no extractable body)`;
-      });
+          prose.length <= PER_RESULT_CAP
+            ? prose
+            : `${prose.slice(0, PER_RESULT_CAP - 3).trimEnd()}...`;
+        kept.push({ ev, prose: capped });
+      }
 
-      const titleOnlyBlock =
-        titleOnly.length > 0
-          ? '\n\nAdditional sources returned across this fan-out (title + URL only; full body not loaded — the user can open them from the citation panel):\n' +
-            titleOnly
-              .map(
-                (ev, i) =>
-                  `- [Source ${BODY_SOURCE_COUNT + i + 1}] ${ev.sourceTitle} — ${ev.sourceUrl ?? '(no url)'}`,
-              )
-              .join('\n')
-          : '';
+      if (kept.length === 0) {
+        return {
+          command: label,
+          value: 'Search returned no on-topic results.',
+          evidence: [],
+        };
+      }
 
-      const groundingRule = [
-        'GROUNDING RULES (apply these strictly to factual claims; persona voice / asides / opinions / recommendations are unaffected):',
-        '',
-        '1. Before naming ANY specific show, movie, programme, time, person, place, or numeric detail, check: is this exact string visibly present somewhere in the source bodies above? If not, you may NOT name it. This includes plausible-sounding TV shows that "feel right" (e.g. Indian serials, Turkish dramas, daily news bulletins) — if the title is not in any source body, do not write it.',
-        '',
-        '2. Read ACROSS all the source bodies, not just the first one. If the user\'s question is about "what is airing right now" and the first source\'s schedule starts at a time later than now, check the other source bodies for an entry that covers the current moment (a live broadcast spanning midnight, a special event running into the small hours). Cross-day live events often appear in a different source than the daily-schedule page.',
-        '',
-        '3. If no source body covers the time, topic, or detail the user is asking about, say so plainly. Do NOT substitute a plausible-sounding guess ("probably a commercial loop", "perhaps the news", "likely a Turkish serial"). "I don\'t know what\'s airing right now from these sources" is the correct answer when all sources are silent on the specific question.',
-        '',
-        '4. Truncation or absence in the sources is not evidence about the real world. Do not promote the nearest visible entry from one source to fill a gap that another source might fill correctly.',
-        '',
-        '5. If one of the title-only sources looks directly relevant to what the user asked (its title alone is the clue), tell the user that source is available in the citation panel. Do NOT fabricate the contents of title-only sources — you have only their titles and URLs.',
-        '',
-        '6. Recommendations and opinions are fine ("you might enjoy a Visconti film tonight", "I\'d skip the late-night devotionals if I were you") as long as they are clearly subjective and not presented as facts about the schedule.',
-      ].join('\n');
+      const resultBlocks = kept
+        .map(({ prose }) => `<result>\n${prose}\n</result>`)
+        .join('\n\n');
+      const value = `<search_results>\n${resultBlocks}\n</search_results>`;
 
-      const queryLabel = queries.length === 1
-        ? `Search query: "${queries[0]}"`
-        : `Search fan-out (${queries.length} parallel queries; leg 1 = raw user text, legs 2..${queries.length} = classifier rewrites): ${queries.map((q) => `"${q}"`).join(', ')}`;
-      const value = `${queryLabel} — top ${bodied.length} result${bodied.length === 1 ? '' : 's'} (full bodies below):\n\n${bodiedBlocks.join('\n\n')}${titleOnlyBlock}\n\n${groundingRule}`;
       return {
         command: label,
         value,
-        evidence: merged,
+        evidence: kept.map((k) => k.ev),
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -221,6 +209,44 @@ export class CommandFulfillerService {
         value: `Search for "${queries.join(' / ')}" failed: ${message}`,
       };
     }
+  }
+
+  /**
+   * Cleans a retrieved snippet into bare prose suitable for the
+   * answer-round prompt. Strips HTML tags (Brave wraps highlighted
+   * terms in <strong>...</strong>), decodes the common entities,
+   * removes embedded URLs (we never want URLs in the model's input
+   * for search results — they leak hostnames and SEO bait), and
+   * collapses whitespace.
+   */
+  private toProse(snippet: string): string {
+    let t = snippet;
+    t = t.replace(/<[^>]+>/g, ' ');
+    t = t
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&nbsp;/g, ' ');
+    t = t.replace(/https?:\/\/\S+/gi, '');
+    t = t.replace(/\s+/g, ' ').trim();
+    return t;
+  }
+
+  /**
+   * ANY-keyword match, case-insensitive substring. The keyword list
+   * is small (3-6 entries by classifier spec); we lowercase the
+   * prose once and test each keyword in turn.
+   */
+  private matchesAnyKeyword(prose: string, keywords: string[]): boolean {
+    const haystack = prose.toLowerCase();
+    for (const kw of keywords) {
+      const needle = kw.toLowerCase().trim();
+      if (!needle) continue;
+      if (haystack.includes(needle)) return true;
+    }
+    return false;
   }
 
   /**
