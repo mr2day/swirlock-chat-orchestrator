@@ -148,99 +148,60 @@ const CONSENSUS_RULE = [
   '- Never invent details (named bodyguards, crowd size, specific punches, exact times, quoted reactions) that no source explicitly states, even if it would make the answer more vivid. Vividness is not worth fabrication.',
 ].join('\n');
 
-const ASSESSMENT_COMMAND_RULES = [
-  'This is where you give commands to the software controller. Available commands:',
+/**
+ * Slim classifier system message (~250 tokens). The classifier's only
+ * job is to emit one or more [command="..."] tags; it doesn't need
+ * the persona, the events briefing, the experience lessons, or any
+ * of the answer-round rules. Earlier versions of this prompt were
+ * 700+ tokens of command syntax with multiple worked examples, on
+ * top of ~1000 tokens of persona biography — total classifier prompt
+ * ran 3.5K-4.5K tokens, which is ~10-30s of prompt-processing
+ * latency on a 14B local model before any output. The slim version
+ * brings the classifier turn back under 1-2s.
+ */
+const CLASSIFIER_INSTRUCTIONS = [
+  'You are a routing classifier for a chatbot. Output ONLY command tag(s) — no prose, no persona voice, no explanation.',
   '',
-  '- [command="SEARCH"][search_prompt="..."] — perform an online search. Write the search prompt(s) in the same language as the user query. Include the user\'s date and/or location from above ONLY when the answer genuinely depends on them — e.g., today\'s news, current weather, opening hours, local events, services nearby. Do NOT add the date or location for biographical, historical, scientific, or generally factual queries; doing so pollutes the search with irrelevant local results.',
-  '  ',
-  '  IMPORTANT — emit AT MOST 3 [search_prompt="..."] tags for the same SEARCH command when the question could be answered by sources of different shapes. Use 2 or 3 tags only — never 4 or 5, each extra tag adds parallel cost. The fan-out runs in parallel and the merged results give the answer round much better coverage. Examples of when to fan out:',
-  '  - "what\'s on TV right now?" → one prompt for the channel\'s daily schedule, one for live events / broadcasts airing right now, one for the channel name + "în direct" / "live" with today\'s date. STOP at 3.',
-  '  - "is X dead?" → one prompt for the person\'s name + "death", one for the person\'s name + "obituary", one for the person\'s name + recent news. STOP at 3.',
-  '  - "latest news about Y" → one prompt for Y as a whole, one for Y + today\'s date, one for Y + the relevant location. STOP at 3.',
-  '  When the question has a single obvious angle (e.g., "who wrote War and Peace?"), one [search_prompt] is fine.',
-  '  Each [search_prompt] should be a complete standalone query in the user\'s language. Format: [command="SEARCH"][search_prompt="A"][search_prompt="B"][search_prompt="C"]. No more than three tags.',
-  '- [command="LOCATION"][search_prompt="..."] — look up the location of something OTHER than the user (a place mentioned in the conversation). The [search_prompt] describes what to find the location of. Example: [command="LOCATION"][search_prompt="where is Mount Everest"].',
-  '- [command="DATE_TIME"][search_prompt="..."] — look up the date or time for somewhere OTHER than the user (e.g., a different timezone, a historical event). Example: [command="DATE_TIME"][search_prompt="current time in Tokyo"].',
-  '- [command="THINKING"] — turn on thinking for composing the final answer. Use this for complex queries that benefit from chain-of-thought.',
-  '- [command="DIRECT"] — no command needed; the answer can be composed directly from the meta-section.',
+  'Wrap your output in [__meta_section__]...[/__meta_section__].',
   '',
-  'You can chain commands like this: [command="THINKING, SEARCH"][search_prompt="..."]. The software controller will build a prompt for you with the result of these commands.',
+  'Available commands:',
+  '- [command="SEARCH"][search_prompt="A"][search_prompt="B"][search_prompt="C"] — web search. Use for factual / current-events / "right now" questions. Emit 1-3 [search_prompt] tags; multiple tags fan out in parallel. Each prompt is a complete standalone query in the user\'s language.',
+  '- [command="THINKING"] — enable chain-of-thought for the answer round. Use for complex multi-step reasoning.',
+  '- [command="DIRECT"] — answer directly, no search. Use for chitchat, greetings, opinions, self/persona questions, anything introspective.',
+  '- [command="LOCATION"][search_prompt="..."] — look up a place OTHER than the user\'s own (the user\'s location is already known).',
+  '- [command="DATE_TIME"][search_prompt="..."] — look up date/time for somewhere/something OTHER than the user (different timezone, historical event).',
   '',
-  'For factual lookups about the EXTERNAL world (biographies, filmographies, lists of works, statistics, dates, current events, places, products), use [command="SEARCH"]. Do not rely on memorized facts; they are often wrong or outdated.',
+  'Chain commands as [command="THINKING, SEARCH"][search_prompt="..."].',
   '',
-  'Do NOT use [command="SEARCH"] for questions about yourself, your nature, your gender, your name, your capabilities, your opinions, your preferences, your feelings, or anything else introspective. Answers to those come from your own identity (the system message), not the web. Use [command="DIRECT"] for those.',
+  'Language rule: detect the language of the user\'s last message and write any [search_prompt] in that exact language. Do NOT add language flavour, asides, or persona voice — output only tags.',
   '',
-  'Wrap your response in meta-section tags, like this: [__meta_section__][command="SEARCH"][search_prompt="..."][/__meta_section__]. Do not write the user-visible answer in this round; only the command tags.',
+  'Date/location: the user\'s dateTime and location (when known) are pre-injected in the user message and do NOT require LOCATION/DATE_TIME commands. Include the date in [search_prompt] only when the answer truly depends on it (today\'s news, opening hours, what is airing now); skip it for biographical / historical / scientific / general factual queries.',
 ].join('\n');
-
-function buildSystemMessage(args: {
-  personaSystemPrompt: string | null;
-  extraRules: string[];
-}): string {
-  // LANGUAGE_RULE comes first. Small models weight the first system-
-  // message paragraph most heavily; the persona prose is heavy enough
-  // (700-1000 tokens of in-character voice) that anything pushed after
-  // it loses authority. Observed in production: a Romanian user query
-  // to Italian-flavored Marcello produced an Italian search prompt
-  // (Exa missed Eurovision) and an Italian reply, both because the
-  // persona's voice anchored the language slot before LANGUAGE_RULE
-  // got a chance to bind.
-  const parts: string[] = [LANGUAGE_RULE];
-  if (args.personaSystemPrompt) parts.push(args.personaSystemPrompt);
-  for (const rule of args.extraRules) parts.push(rule);
-  return parts.join('\n\n');
-}
 
 export function buildAssessmentPrompt(args: {
   userText: string;
   cityCountry: string | null;
   dateTime: string;
-  recentHistoryBlock: string | null;
-  personaSystemPrompt: string | null;
-  experienceLessons?: Array<{
-    content: string;
-    importance: 'core' | 'important' | 'incidental';
-  }>;
   /**
-   * Optional "what's happening today" briefing assembled by the
-   * orchestrator's DailyBriefingService. When present, gives the
-   * classifier prior knowledge about ongoing live events / breaking
-   * news so it can write search queries that surface event-specific
-   * pages rather than generic listings.
+   * Compact pronoun-resolution hint. Caller should pass at most the
+   * last 1-2 short user lines — NOT full assistant prose. Anything
+   * heavier turns into 500-2000 tokens of prompt bloat with no
+   * decision-quality return.
    */
-  dailyBriefing?: string;
+  recentHistoryBlock: string | null;
 }): LlmMessage[] {
-  const extraRules: string[] = [ASSESSMENT_COMMAND_RULES];
-  const lessonsBlock = renderExperienceLessonsForClassifier(
-    args.experienceLessons,
-  );
-  if (lessonsBlock) extraRules.push(lessonsBlock);
-  if (args.dailyBriefing && args.dailyBriefing.trim()) {
-    extraRules.push(
-      [
-        "Today's events briefing (use this to bias the search queries you emit when the user asks about live events, breaking news, or what is airing right now — pull keywords from here into your [search_prompt] tags so Exa surfaces the relevant pages instead of generic listings):",
-        args.dailyBriefing.trim(),
-      ].join('\n'),
-    );
-  }
-  const systemContent = buildSystemMessage({
-    personaSystemPrompt: args.personaSystemPrompt,
-    extraRules,
-  });
+  // Classifier prompt is deliberately slim. No persona, no lessons,
+  // no briefing, no answer-round rules. The model has one job: emit
+  // command tags. See CLASSIFIER_INSTRUCTIONS for the full spec.
+  const systemContent = CLASSIFIER_INSTRUCTIONS;
 
   const userParts: string[] = [
     '[__meta_section__]',
     userContextLine(args),
-    '',
-    'This is a meta-section part of the conversation which is invisible to the user. The user\'s location and dateTime above are already provided to you, so you do NOT need to use [command="LOCATION"] or [command="DATE_TIME"] just to get those values for the user — they are already in this meta-section.',
   ];
 
   if (args.recentHistoryBlock) {
-    userParts.push(
-      '',
-      'Recent conversation (so you can resolve pronouns and references in the user query):',
-      args.recentHistoryBlock,
-    );
+    userParts.push('', `Last user turn(s): ${args.recentHistoryBlock}`);
   }
 
   userParts.push(
@@ -617,31 +578,6 @@ function walkHistoryNewestFirst(
  * block in its own system message, so identity and summary are
  * decoupled.
  */
-/**
- * Renders experience lessons as an extra system-message section for
- * the classifier (assessment) round. Lessons are behavioural — they
- * tell the model what to do differently when it sees a pattern it
- * has previously gotten wrong. The classifier's SEARCH/DIRECT
- * decision is exactly where they should bite.
- */
-function renderExperienceLessonsForClassifier(
-  lessons:
-    | Array<{
-        content: string;
-        importance: 'core' | 'important' | 'incidental';
-      }>
-    | undefined,
-): string | null {
-  if (!lessons || lessons.length === 0) return null;
-  const lines: string[] = [
-    'Lessons from past mistakes you have made (apply them when deciding whether to SEARCH):',
-  ];
-  for (const lesson of lessons) {
-    lines.push(`- [${lesson.importance}] ${lesson.content}`);
-  }
-  return lines.join('\n');
-}
-
 function renderIdentityOnlyBlock(
   ctx: FragmentedContextInput | undefined,
 ): string | null {

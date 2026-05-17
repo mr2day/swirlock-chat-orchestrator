@@ -29,7 +29,6 @@ import {
   extractUserText,
 } from '../chat-session.service';
 import { ConversationHistoryService } from '../conversation/conversation-history.service';
-import { DailyBriefingService } from '../daily-briefing.service';
 import { GeocodingService } from '../location/geocoding.service';
 import { DecisionTraceService } from '../trace/decision-trace.service';
 import type { ConversationMessage } from '../conversation/conversation-history.service';
@@ -44,19 +43,6 @@ import {
 } from './reverse-control-prompts';
 
 const RECENT_HISTORY_LIMIT = 12;
-
-/**
- * Approximate token budget for the recent-history block we send the
- * classifier. Capped by tokens, not message count: long assistant
- * replies (multi-thousand-char music biographies, etc.) bloat the
- * classifier prefill latency into multi-second territory without
- * helping the classification decision. The classifier mainly needs
- * enough context to resolve pronouns in the current user query;
- * older detail is dead weight.
- *
- * Sized roughly around 2 recent assistant replies of typical length.
- */
-const CLASSIFIER_HISTORY_TOKEN_BUDGET = 2000;
 
 export type PhaseEvent =
   | { type: 'started'; phase: string; label: string }
@@ -156,7 +142,6 @@ export class ReverseControlFlowService {
     private readonly trace: DecisionTraceService,
     private readonly capping: CappingService,
     private readonly fulfiller: CommandFulfillerService,
-    private readonly dailyBriefing: DailyBriefingService,
   ) {}
 
   async runTurn(input: RunTurnInput): Promise<TurnDoneEnvelope> {
@@ -187,31 +172,18 @@ export class ReverseControlFlowService {
       personaName: ctx.personaName,
     });
 
-    // Fire the "today's events" briefing fetch in parallel with the
-    // rest of the assessment-round setup. First request of the hour
-    // pays ~2s of latency; cache hits return synchronously. The
-    // briefing gives the classifier prior knowledge so it can write
-    // search queries that surface live events (Eurovision, breaking
-    // news, sports finals) instead of generic schedule queries that
-    // never reach the event-specific pages.
-    const briefingPromise = this.dailyBriefing.getBriefing({
-      sessionId: ctx.sessionId,
-      correlationId: ctx.correlationId,
-      userText: ctx.userText,
-      dateTime,
-    });
-
     try {
       // ------- assessment round -------
-      const dailyBriefing = await briefingPromise;
+      // Classifier prompt is deliberately minimal: no persona, no
+      // experience lessons, no events briefing. The classifier's job
+      // is to emit command tags, and bigger prompts mean more
+      // prompt-processing latency on the 14B local model. History
+      // block is user-only and capped — see renderClassifierHistoryBlock.
       const assessmentMessages = buildAssessmentPrompt({
         userText: ctx.userText,
         cityCountry,
         dateTime,
-        recentHistoryBlock: this.renderHistoryBlock(ctx.history),
-        personaSystemPrompt: ctx.personaSystemPrompt,
-        experienceLessons: fragmentedContext.experienceLessons,
-        ...(dailyBriefing ? { dailyBriefing } : {}),
+        recentHistoryBlock: this.renderClassifierHistoryBlock(ctx.history),
       });
 
       onPhase?.({
@@ -578,46 +550,21 @@ export class ReverseControlFlowService {
   }
 
   /**
-   * Rough char-based token estimate. We're not metering tokens for
-   * billing — just sizing a prompt budget — so a heuristic beats
-   * adding a tokenizer dependency for ~10% better accuracy. ~3.5
-   * chars/token is reasonable for our English + Romanian mix and
-   * leans toward overestimation, which keeps the budget conservative.
+   * Slim history block for the classifier: ONLY the last two user
+   * messages (no assistant prose), each trimmed to a short snippet.
+   * Sole purpose is pronoun / referent resolution — "what about him?"
+   * needs the prior "him" reference. The full assistant reply in
+   * persona prose (~600 tokens per assistant turn) is dead weight
+   * for the classifier's decision and used to dominate the prompt.
    */
-  private estimateTokens(text: string): number {
-    return Math.ceil(text.length / 3.5);
-  }
-
-  private renderHistoryBlock(history: ConversationMessage[]): string | null {
-    // Walk newest → oldest, including messages while the running
-    // token total stays under CLASSIFIER_HISTORY_TOKEN_BUDGET. The
-    // most recent message is always included even if it alone
-    // overshoots — skipping it would defeat the purpose.
-    // Labels use "User:" / "You:" so the chatbot reading this history
-    // sees its own past responses as belonging to itself, not to some
-    // anonymous "ASSISTANT" entity.
-    const eligible = history.filter((m) => m.role !== 'system');
-    const picked: ConversationMessage[] = [];
-    let totalTokens = 0;
-    for (let i = eligible.length - 1; i >= 0; i--) {
-      const m = eligible[i];
-      const label = m.role === 'user' ? 'User' : 'You';
-      const lineTokens = this.estimateTokens(
-        `${label}: ${m.content}`,
-      );
-      if (
-        picked.length > 0 &&
-        totalTokens + lineTokens > CLASSIFIER_HISTORY_TOKEN_BUDGET
-      ) {
-        break;
-      }
-      picked.unshift(m);
-      totalTokens += lineTokens;
-    }
-    if (picked.length === 0) return null;
-    return picked
-      .map((m) => `${m.role === 'user' ? 'User' : 'You'}: ${m.content}`)
-      .join('\n');
+  private renderClassifierHistoryBlock(
+    history: ConversationMessage[],
+  ): string | null {
+    const userMsgs = history.filter((m) => m.role === 'user').slice(-2);
+    if (userMsgs.length === 0) return null;
+    const truncate = (s: string): string =>
+      s.length > 200 ? `${s.slice(0, 197)}...` : s;
+    return userMsgs.map((m) => `User: ${truncate(m.content)}`).join('\n');
   }
 
   private summariseParsed(parsed: ParsedCommands): string {
