@@ -95,6 +95,30 @@ const LANGUAGE_RULE_REMINDER =
   "LANGUAGE REMINDER: reply in the exact language of the user's last message. The persona's voice colours the language; it does not replace it.";
 
 /**
+ * Injected only when a session summary is included in this turn's
+ * prompt. Tells the model how its own context is laid out so it can
+ * answer "what was my first message" / "what did we talk about an
+ * hour ago" accurately instead of treating the oldest raw message
+ * it sees as "the first" — the literal first is in the summary.
+ *
+ * Without this, small models tend to treat the raw window as the
+ * whole conversation and quote its oldest entry when asked "first".
+ */
+const STRUCTURAL_AWARENESS_RULE = [
+  "PROMPT STRUCTURE: This turn's context is laid out for you as:",
+  '  1. The system messages above (persona, rules, current date/location).',
+  '  2. A session summary covering messages 1..N — your compressed memory of earlier turns that did not fit verbatim.',
+  '  3. The raw conversation from message N+1 through this turn, role-tagged.',
+  '  4. The current user message.',
+  '',
+  'If the user asks about earlier turns:',
+  '  - If the message they reference is in the raw block, quote it verbatim.',
+  '  - If it predates the raw block, it is in the SUMMARY. Use the summary to describe it, and be honest that you are paraphrasing from a summary, not quoting.',
+  '  - Never claim a message from the raw block is the "first" of the session when a summary is present — the literal first is in the summary, message 1.',
+  '  - If the user asks you to describe the structure of your own context, describe it (these four blocks above). Do not deny that you have access to summaries and raw history.',
+].join('\n');
+
+/**
  * Injected into the answer-round system message ONLY when this turn has
  * fulfilled context (search/lookup results). Without it, gemma3:12b
  * cheerfully weaves narratives from name-similar but unrelated sources
@@ -505,7 +529,9 @@ export function buildAnswerPrompt(args: {
         role: 'system',
         content:
           `Summary of earlier turns in this session (covering messages 1..${summaryHit.throughSeq}, older than the raw messages shown below):\n` +
-          summaryHit.summary,
+          summaryHit.summary +
+          '\n\n' +
+          STRUCTURAL_AWARENESS_RULE,
       };
       summaryTokens = tokensForText(summaryMessage.content);
       summaryThroughSeq = summaryHit.throughSeq;
