@@ -161,31 +161,10 @@ export class ReverseControlFlowService {
     let thinkingForAnswer = false;
     let parsed: ParsedCommands;
 
-    // Load fragmenter context once for the whole turn — the
-    // Fragmenter-derived "durable facts" injection is DISABLED.
-    //
-    // The fragmenter accumulated catastrophic noise:
-    //   - app_identities is global (not scoped by persona), so
-    //     Duchess's "I am Duchess Noctilock" and Vespera's "Mira
-    //     calls me Vespera Volt" leaked into every Gigi session.
-    //   - user_identities contained session-specific incidentals
-    //     treated as durable ("the user initiated this session in
-    //     Romanian" → applied to all future sessions).
-    //   - Bullets are rendered as authoritative facts; the model
-    //     used them to override LANGUAGE_RULE (the assistant's
-    //     "prefers to respond in Romanian" fact won).
-    //
-    // The persona's systemPromptTemplate already defines the
-    // assistant. The orchestrator's buildAnswerContextBlock already
-    // injects the user's date+location explicitly. Nothing else
-    // belongs in a cross-session prompt at this stage. We pass an
-    // empty fragmentedContext until the architecture is fixed:
-    // app_identities partitioned per-persona, user_identities
-    // filtered for true durability, both gated by reinforcement.
+    // The user-profiling subsystem is deleted. Only the per-session
+    // summary lookup remains here, used by buildAnswerPrompt when
+    // raw history overflows the model's prompt budget.
     const fragmentedContext = {
-      userIdentity: [],
-      appIdentity: [],
-      experienceLessons: [],
       fetchSummaryUpTo: (beforeSeq: number | null) =>
         this.fragmenterReader.load({
           sessionId: ctx.sessionId,

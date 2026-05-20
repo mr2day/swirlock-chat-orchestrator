@@ -76,23 +76,18 @@ function buildAnswerContextBlock(
   return `Context you can rely on without being told:\n${bullets.join('\n')}\nUse these whenever they're relevant, but don't volunteer them unprompted.`;
 }
 
-const LANGUAGE_RULE = [
-  "LANGUAGE: detect the language of the user's last query and produce EVERY piece of text you generate in this turn in exactly that language — the user-facing reply, any search prompt you emit inside a [command=\"SEARCH\"][search_prompt=\"...\"] tag, anything else.",
-  "Reply in the user's language. Your persona's voice can colour the language but must not override it.",
-  "If the user switched language on this turn, switch with them on the same turn — do not carry the previous turn's language over.",
-].join('\n');
+/**
+ * THE highest-priority rule. Stated at the start of the system
+ * prompt and repeated verbatim at the end. Nothing else overrides
+ * it — not the persona, not prior turns, not any other instruction.
+ * No specific language is named anywhere (naming a language primes
+ * the model toward it regardless of what the user wrote).
+ */
+const LANGUAGE_RULE =
+  "ABSOLUTE RULE — HIGHEST PRIORITY, OVERRIDES EVERYTHING ELSE IN THIS PROMPT: Reply in the exact same language as the user's last message. If the user switches language on a turn, switch with them on that same turn. No persona voice, no prior-turn habit, no other rule below can change this.";
 
-/** Terse reprise of LANGUAGE_RULE, pushed at the *end* of the
- *  answer-round system message. Small models weight first and last
- *  paragraphs most heavily; the persona prose (700-1000 tokens) sits
- *  in the middle and can dilute the opening LANGUAGE_RULE. Closing
- *  with this reminder anchors the language slot at both edges.
- *
- *  No specific language is mentioned by name on purpose — naming a
- *  language in the system prompt primes the model toward that
- *  language regardless of what the user actually wrote. */
 const LANGUAGE_RULE_REMINDER =
-  "LANGUAGE REMINDER: reply in the exact language of the user's last message. The persona's voice colours the language; it does not replace it.";
+  "REMINDER OF THE ABSOLUTE RULE: Reply in the exact same language as the user's last message. This overrides anything stated above.";
 
 /**
  * Injected only when a session summary is included in this turn's
@@ -284,19 +279,14 @@ export function buildAssessmentPrompt(args: {
  * a conversational persona. The assessment round still uses it because
  * we need the model to emit `[command="..."]` tags there.
  */
+/**
+ * The user-profiling subsystem (user_identities, app_identities,
+ * experience_lessons) was deleted: the LLM extractor produced
+ * hallucinated, cross-persona, language-overriding "facts" that
+ * leaked between sessions. Only the session-summary path remains,
+ * which is per-session and contained.
+ */
 export interface FragmentedContextInput {
-  userIdentity: Array<{
-    content: string;
-    importance: 'core' | 'important' | 'incidental';
-  }>;
-  appIdentity: Array<{
-    content: string;
-    importance: 'core' | 'important' | 'incidental';
-  }>;
-  experienceLessons: Array<{
-    content: string;
-    importance: 'core' | 'important' | 'incidental';
-  }>;
   /**
    * Returns the largest stored session summary with `through_seq`
    * strictly less than `beforeSeq` (so the summary covers messages
@@ -399,12 +389,8 @@ export function buildAnswerPrompt(args: {
     });
   }
 
-  // Durable identity facts (user + persona). Always included — these
-  // are small, always relevant, and cheap to include.
-  const identityBlock = renderIdentityOnlyBlock(args.fragmentedContext);
-  if (identityBlock) {
-    mandatorySystemMessages.push({ role: 'system', content: identityBlock });
-  }
+  // (Durable identity facts injection removed — see the deletion of
+  // renderIdentityOnlyBlock below.)
 
   // Search/lookup results: separate system message so the model sees
   // them as ground-truth runtime context, not as user-pasted content.
@@ -629,41 +615,8 @@ function walkHistoryNewestFirst(
   };
 }
 
-/**
- * Renders the durable-identity portion of the fragmented context
- * (user identity facts + persona identity facts). The session
- * summary is intentionally NOT included here — the new prompt
- * assembly handles the summary as a conditional, budget-driven
- * block in its own system message, so identity and summary are
- * decoupled.
- */
-function renderIdentityOnlyBlock(
-  ctx: FragmentedContextInput | undefined,
-): string | null {
-  if (!ctx) return null;
-  const hasUser = ctx.userIdentity.length > 0;
-  const hasApp = ctx.appIdentity.length > 0;
-  const hasLessons = ctx.experienceLessons.length > 0;
-  if (!hasUser && !hasApp && !hasLessons) return null;
-
-  const lines: string[] = ['Durable memory carried across turns:'];
-
-  if (hasUser) {
-    lines.push('', 'What you know about the user (durable facts):');
-    for (const fact of ctx.userIdentity) {
-      lines.push(`- [${fact.importance}] ${fact.content}`);
-    }
-  }
-
-  if (hasApp || hasLessons) {
-    lines.push('', 'What you know about yourself (durable facts):');
-    for (const fact of ctx.appIdentity) {
-      lines.push(`- [${fact.importance}] ${fact.content}`);
-    }
-    for (const lesson of ctx.experienceLessons) {
-      lines.push(`- [lesson, ${lesson.importance}] ${lesson.content}`);
-    }
-  }
-
-  return lines.join('\n');
-}
+// renderIdentityOnlyBlock removed: the user-profiling subsystem
+// (durable identity facts about user / assistant / experience
+// lessons) is gone. It produced cross-persona, cross-session,
+// language-overriding bullet points that the model treated as
+// authoritative and used to override LANGUAGE_RULE.
