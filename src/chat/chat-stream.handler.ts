@@ -330,6 +330,8 @@ export class ChatStreamHandler {
         dto,
         abortSignal: abort.signal,
         onAccepted: () => send('turn.accepted'),
+        onUserCorrected: (corrected) =>
+          send('turn.user_corrected', { content: corrected }),
         onRetrievalEvent: (event) => send('turn.retrieval', { event }),
         onModelEvent: (evt) => {
           switch (evt.type) {

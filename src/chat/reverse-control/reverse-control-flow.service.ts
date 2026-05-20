@@ -83,6 +83,11 @@ export interface RunTurnInput {
   onModelEvent: (event: LlmStreamEvent) => void;
   onFinalChunk: (text: string) => void;
   onPhaseEvent?: PhaseEventEmitter;
+  /** Fired when the STT-correction round produces a corrected user
+   *  text that differs from the raw transcript. The UI uses this to
+   *  patch the user-message bubble so the persisted text matches
+   *  what the bot is actually answering. */
+  onUserCorrected?: (corrected: string) => void;
   resolveUserLocation: () => Promise<UserLocation | null>;
 }
 
@@ -508,9 +513,13 @@ export class ReverseControlFlowService {
     // before the assessment + answer rounds see the text. Per user
     // spec: instruction + text only — no system context, no persona,
     // no language rule, nothing else.
-    const userText = input.dto.options?.fromVoice
-      ? await this.correctTranscript(rawUserText, input.correlationId)
-      : rawUserText;
+    let userText = rawUserText;
+    if (input.dto.options?.fromVoice) {
+      userText = await this.correctTranscript(rawUserText, input.correlationId);
+      if (userText !== rawUserText) {
+        input.onUserCorrected?.(userText);
+      }
+    }
     const imageParts = extractImageParts(input.dto.message.parts);
 
     input.onAccepted();
