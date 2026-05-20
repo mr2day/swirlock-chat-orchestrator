@@ -78,9 +78,21 @@ function buildAnswerContextBlock(
 
 const LANGUAGE_RULE = [
   "LANGUAGE: detect the language of the user's last query and produce EVERY piece of text you generate in this turn in exactly that language — the user-facing reply, any search prompt you emit inside a [command=\"SEARCH\"][search_prompt=\"...\"] tag, anything else.",
-  "Persona style — Italian asides, Romanian endearments, French politeness markers, scattered loanwords, etc. — is decoration only. It does NOT override the user's language. If the user wrote in Romanian and your persona is Italian-flavored, you still reply in Romanian (with the persona's voice colouring the Romanian, not replacing it).",
+  "Persona style (asides, endearments, politeness markers, scattered loanwords from the persona's heritage) is decoration only. It does NOT override the user's language. Reply in the user's language; let the persona's voice colour that language, not replace it.",
   "If the user switched language on this turn, switch with them on the same turn — do not carry the previous turn's language over.",
 ].join('\n');
+
+/** Terse reprise of LANGUAGE_RULE, pushed at the *end* of the
+ *  answer-round system message. Small models weight first and last
+ *  paragraphs most heavily; the persona prose (700-1000 tokens) sits
+ *  in the middle and can dilute the opening LANGUAGE_RULE. Closing
+ *  with this reminder anchors the language slot at both edges.
+ *
+ *  No specific language is mentioned by name on purpose — naming a
+ *  language in the system prompt primes the model toward that
+ *  language regardless of what the user actually wrote. */
+const LANGUAGE_RULE_REMINDER =
+  "LANGUAGE REMINDER: reply in the exact language of the user's last message. The persona's voice colours the language; it does not replace it.";
 
 /**
  * Injected into the answer-round system message ONLY when this turn has
@@ -350,6 +362,10 @@ export function buildAnswerPrompt(args: {
     systemParts.push(CONSENSUS_RULE);
     systemParts.push(ELABORATION_RULE);
   }
+  // Last position, after persona and rules — anchors the language
+  // slot at both edges so the persona's voice can't pull the model
+  // into a non-target language.
+  systemParts.push(LANGUAGE_RULE_REMINDER);
 
   const mandatorySystemMessages: LlmMessage[] = [];
   if (systemParts.length > 0) {
