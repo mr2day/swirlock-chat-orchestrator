@@ -76,9 +76,39 @@ Propose the architecture the user sketched:
 
 Present the research as a written summary; do not build until the user picks a direction.
 
-## Status
+## Status (all eight items shipped 2026-05-17)
 
-- [x] PLAN.md written.
-- [ ] Batch 1 (issues 1, 8, 6, 3) — in progress.
-- [ ] Batch 2 (issues 2, 5, 4) — pending.
-- [ ] Batch 3 (issue 7) — research, pending.
+**Batch 1 — shipped together in UI b121 + orchestrator:**
+
+- [x] **Issue 1.** Touch-to-stop autoscroll on mobile fixed by (a) cancelling any pending rAF the moment pointerdown/touchstart fires, (b) re-checking `userInteracting()` *inside* the rAF callback before writing scrollTop, (c) adding `touchstart` alongside `pointerdown` because some Android WebViews delay pointerdown ~100ms during fast layout. [chat-page.ts](../swirlock-chatbot-ui/src/app/features/chat/chat-page.ts).
+- [x] **Issue 8.** After Send on a touch device (`matchMedia('(pointer: coarse)')`), the textarea is blurred so the soft keyboard collapses. Desktop still re-focuses for fast follow-up typing. [composer.ts](../swirlock-chatbot-ui/src/app/features/chat/components/composer/composer.ts).
+- [x] **Issue 6.** Bubble's `statusLabel` now populates for every status (retrieving / awaiting_location / streaming → "Searching the web...", "Waiting for your location...", "Writing answer..."), suppressed only when `agentStatus` or `retrievalStatus` carries a more specific label. The redundant `.typing` three-dots element is removed. [message-bubble.ts](../swirlock-chatbot-ui/src/app/features/chat/components/message-bubble/message-bubble.ts).
+- [x] **Issue 3.** `LANGUAGE_RULE_REMINDER` pushed at the end of the answer-round system message so the language slot is anchored at both edges. The original LANGUAGE_RULE had `If the user wrote in Romanian and your persona is Italian-flavored, you still reply in Romanian` — that exact phrasing was biasing the model toward Romanian regardless of user language. Replaced with abstract phrasing — no language is named anywhere in the system prompt. [reverse-control-prompts.ts](src/chat/reverse-control/reverse-control-prompts.ts).
+
+**Batch 2 — shipped together in UI b122:**
+
+- [x] **Issue 2.** DOMPurify's `ALLOWED_ATTR` whitelist was stripping `src` from `<img>` tags emitted by marked. Added `src`, `alt`, `title`. Bot-emitted markdown images now render. [markdown.ts](../swirlock-chatbot-ui/src/app/core/markdown/markdown.ts).
+- [x] **Issue 4.** Persona biographies trimmed:
+  - **Gigi & Gigina** are now agent-shaped minimal — "small friendly robot, helps with whatever, default to doing the work." All lore removed (no more "Bunicu", no Cluj workshop, no cat upstairs). The model surfaced those unsolicited and confused users.
+  - **Duchess, Marcello, Vespera, Violetta** got light trims: dropped the densest concrete lore (named relatives, specific addresses, historical backstory beats); kept voice anchors, likes, opinions, and posture.
+  - Behavioral rules extracted to [personas/shared-rules.ts](../swirlock-chatbot-ui/src/app/core/personas/shared-rules.ts) — `CAPABILITY_RULES` (image-awareness, no-name-prefix) append automatically to every persona; `COMPANION_RULES` (warm-companion posture) inline only in the four conversational personas, not in Gigi/Gigina.
+
+**Batch 3 — investigations + structural fixes:**
+
+- [x] **Issue 5.** Context-window investigation:
+  - **Pre-flip baseline:** ministral-3:14b had `num_ctx=32768, promptBudgetTokens=26214`; gemma3:12b had `num_ctx=16384, promptBudgetTokens=13107`. Gemma3 fits half because its KV cache costs nearly 2× per token (368640 vs 204800 bytes).
+  - **Fane Spoitoru session diagnosed:** 74 messages, ~40K total tokens — already overflows both budgets. Bot's "primul meu mesaj" misanswer pattern was caused by it not realising the literal first turn was in the SUMMARY block, not in the raw window it was seeing.
+  - **Fragmenter summaries verified:** 17 stored for that session, contiguous coverage (`through_seq < oldestKept` + `seq > summaryThroughSeq` filter — no gap).
+  - **`STRUCTURAL_AWARENESS_RULE` injected** next to the summary system message in the answer-round prompt, explicitly describing the four-block layout (system / summary / raw / current) and instructing the model how to answer "what was my first message" correctly. [reverse-control-prompts.ts](src/chat/reverse-control/reverse-control-prompts.ts).
+  - **q8_0 KV cache flipped** at user's go-ahead: `OLLAMA_KV_CACHE_TYPE=q8_0` + `OLLAMA_FLASH_ATTENTION=1` as user env vars, `HARDWARE_KV_CACHE_ELEMENT_BYTES=1` in [host.config.local.cjs](../swirlock-llm-host/host.config.local.cjs). Confirmed live: ministral now `num_ctx=65536, promptBudget=52428` (2×), gemma3 will be 32K/26K when next selected.
+
+**Batch 4 — voice flow:**
+
+- [x] **Issue 7.** Built the full vocal flow as researched and approved. [voice.service.ts](../swirlock-chatbot-ui/src/app/core/services/voice.service.ts) owns a four-state machine (off / listening / preview / speaking). Tap the mic → continuous STT via `@capacitor-community/speech-recognition`. Partial results stream into `liveTranscript`; regex wake-words `show preview` / `arată previzualizare` freeze the transcript into `previewText` and surface it in the composer's textarea via signal-based wiring. From preview, mic still listens but only watches for `send` / `trimite mesajul`. On submit, mic stops and TTS (`@capacitor-community/text-to-speech`) sentence-chunks the assistant's streaming reply, queued via `QueueStrategy.Add` so chunks play seamlessly. After the last chunk, mic auto-restarts. SpeechRecognizer's silence-timeout is handled by listening to `listeningState='stopped'` and respawning if the state is still active. Android manifest gained `RECORD_AUDIO` and a `<queries>` block for the RecognitionService + TextToSpeech intents.
+
+**Live state of the system:**
+
+- Web: gigi-the-robot.com is on UI b123.
+- APK: [android/app/build/outputs/apk/debug/app-debug.apk](../swirlock-chatbot-ui/android/app/build/outputs/apk/debug/app-debug.apk) carries b123 baked in.
+- Orchestrator: running on the new prompt-budget cached `numCtx=65536, promptBudgetTokens=52428`, with the language rule and structural-awareness rule shipped.
+- Active model: ministral-3:14b. Last tested with gemma3:12b briefly; flip back via [host.config.local.cjs](../swirlock-llm-host/host.config.local.cjs).
