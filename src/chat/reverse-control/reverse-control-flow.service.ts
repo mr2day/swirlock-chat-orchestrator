@@ -434,6 +434,61 @@ export class ReverseControlFlowService {
 
   // ----- helpers -----
 
+  /**
+   * STT-correction round. Per user spec: a single short LLM call,
+   * minimal prompt — just the instruction and the raw text. No
+   * persona, no language rule, no context. With temperature 0 the
+   * model fixes obvious spelling / homophone errors and leaves
+   * everything else alone. If the call fails or the result looks
+   * suspicious (much longer than the input, empty, etc.) we fall
+   * back to the raw transcript rather than discard the user's turn.
+   */
+  private async correctTranscript(
+    rawText: string,
+    correlationId: string,
+  ): Promise<string> {
+    const trimmed = rawText.trim();
+    if (!trimmed) return rawText;
+    const messages = [
+      { role: 'system' as const, content: 'correct the eventual spelling mistakes in this text' },
+      { role: 'user' as const, content: trimmed },
+    ];
+    try {
+      const result = await this.llm.streamInfer({
+        correlationId: `${correlationId}:stt-correct`,
+        messages,
+        options: {
+          responseFormat: 'text',
+          thinking: false,
+          ollama: { temperature: 0 },
+        },
+        onEvent: () => {
+          /* one-shot; no streaming surface */
+        },
+      });
+      const corrected = result.text.trim();
+      // Sanity: never expand the text more than 2.5x (a real
+      // correction shouldn't add a paragraph of commentary), and
+      // don't accept an empty result.
+      if (!corrected) return rawText;
+      if (corrected.length > Math.max(80, trimmed.length * 2.5)) {
+        this.log.warn(
+          `[stt-correct] result too long (${corrected.length} chars vs ${trimmed.length}); falling back to raw transcript`,
+        );
+        return rawText;
+      }
+      if (corrected !== trimmed) {
+        this.log.log(`[stt-correct] "${trimmed}" → "${corrected}"`);
+      }
+      return corrected;
+    } catch (err) {
+      this.log.warn(
+        `[stt-correct] failed, using raw transcript: ${(err as Error).message}`,
+      );
+      return rawText;
+    }
+  }
+
   private async prepareTurnContext(
     input: RunTurnInput,
   ): Promise<PreparedTurnContext> {
@@ -442,12 +497,20 @@ export class ReverseControlFlowService {
       input.authUserId,
     );
 
-    const userText = extractUserText(input.dto.message.parts);
-    if (!userText) {
+    const rawUserText = extractUserText(input.dto.message.parts);
+    if (!rawUserText) {
       throw new BadRequestException(
         'message.parts must contain at least one non-empty text part',
       );
     }
+    // STT-correction round: when the turn comes in from voice, run a
+    // single minimal LLM call to fix obvious transcription errors
+    // before the assessment + answer rounds see the text. Per user
+    // spec: instruction + text only — no system context, no persona,
+    // no language rule, nothing else.
+    const userText = input.dto.options?.fromVoice
+      ? await this.correctTranscript(rawUserText, input.correlationId)
+      : rawUserText;
     const imageParts = extractImageParts(input.dto.message.parts);
 
     input.onAccepted();

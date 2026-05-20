@@ -84,6 +84,16 @@ class OptionsDto {
   @IsOptional()
   @IsBoolean()
   forceThinking?: boolean;
+
+  /**
+   * Set by the UI when the turn was initiated by voice (Android STT
+   * auto-submit). The orchestrator runs a single short LLM call to
+   * clean up obvious transcription errors before the assessment
+   * round picks up the user text.
+   */
+  @IsOptional()
+  @IsBoolean()
+  fromVoice?: boolean;
 }
 
 export class UserLocationDto {
