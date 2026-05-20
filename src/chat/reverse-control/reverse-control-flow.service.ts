@@ -162,15 +162,37 @@ export class ReverseControlFlowService {
     let parsed: ParsedCommands;
 
     // Load fragmenter context once for the whole turn — the
-    // classifier (assessment) round uses its `experienceLessons` to
-    // inform the SEARCH/DIRECT decision (Unit G); the answer round
-    // uses the full set. Loaded outside the try so a fragmenter-DB
-    // failure surfaces clearly rather than getting swallowed.
-    const fragmentedContext = this.fragmenterReader.load({
-      sessionId: ctx.sessionId,
-      userId: ctx.userId,
-      personaName: ctx.personaName,
-    });
+    // Fragmenter-derived "durable facts" injection is DISABLED.
+    //
+    // The fragmenter accumulated catastrophic noise:
+    //   - app_identities is global (not scoped by persona), so
+    //     Duchess's "I am Duchess Noctilock" and Vespera's "Mira
+    //     calls me Vespera Volt" leaked into every Gigi session.
+    //   - user_identities contained session-specific incidentals
+    //     treated as durable ("the user initiated this session in
+    //     Romanian" → applied to all future sessions).
+    //   - Bullets are rendered as authoritative facts; the model
+    //     used them to override LANGUAGE_RULE (the assistant's
+    //     "prefers to respond in Romanian" fact won).
+    //
+    // The persona's systemPromptTemplate already defines the
+    // assistant. The orchestrator's buildAnswerContextBlock already
+    // injects the user's date+location explicitly. Nothing else
+    // belongs in a cross-session prompt at this stage. We pass an
+    // empty fragmentedContext until the architecture is fixed:
+    // app_identities partitioned per-persona, user_identities
+    // filtered for true durability, both gated by reinforcement.
+    const fragmentedContext = {
+      userIdentity: [],
+      appIdentity: [],
+      experienceLessons: [],
+      fetchSummaryUpTo: (beforeSeq: number | null) =>
+        this.fragmenterReader.load({
+          sessionId: ctx.sessionId,
+          userId: ctx.userId,
+          personaName: ctx.personaName,
+        }).fetchSummaryUpTo(beforeSeq),
+    };
 
     try {
       // ------- assessment round -------
