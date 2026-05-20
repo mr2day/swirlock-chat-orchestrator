@@ -78,7 +78,7 @@ function buildAnswerContextBlock(
 
 const LANGUAGE_RULE = [
   "LANGUAGE: detect the language of the user's last query and produce EVERY piece of text you generate in this turn in exactly that language — the user-facing reply, any search prompt you emit inside a [command=\"SEARCH\"][search_prompt=\"...\"] tag, anything else.",
-  "Persona style (asides, endearments, politeness markers, scattered loanwords from the persona's heritage) is decoration only. It does NOT override the user's language. Reply in the user's language; let the persona's voice colour that language, not replace it.",
+  "Reply in the user's language. Your persona's voice can colour the language but must not override it.",
   "If the user switched language on this turn, switch with them on the same turn — do not carry the previous turn's language over.",
 ].join('\n');
 
