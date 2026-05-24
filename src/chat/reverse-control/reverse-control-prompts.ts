@@ -1,5 +1,80 @@
+import { franc } from 'franc-min';
 import type { LlmMessage } from '../../llm-host/llm-host.service';
 import { estimateTokens } from '../utils/token-estimator';
+
+/**
+ * ISO 639-3 → English language name. Used by `detectLanguageHint`
+ * to phrase the per-turn note for the answer-round model. Covers
+ * the European set the app's user base actually writes in. Add to
+ * this list freely; missing codes simply suppress the hint (the
+ * LLM falls back to LANGUAGE_RULE alone, which is still correct).
+ */
+const ISO_639_3_TO_LANGUAGE_NAME: Record<string, string> = {
+  ron: 'Romanian',
+  spa: 'Spanish',
+  fra: 'French',
+  ita: 'Italian',
+  deu: 'German',
+  por: 'Portuguese',
+  pol: 'Polish',
+  ell: 'Greek',
+  nld: 'Dutch',
+  rus: 'Russian',
+  ukr: 'Ukrainian',
+  tur: 'Turkish',
+  ces: 'Czech',
+  slk: 'Slovak',
+  hun: 'Hungarian',
+  bul: 'Bulgarian',
+  hrv: 'Croatian',
+  srp: 'Serbian',
+  slv: 'Slovenian',
+  swe: 'Swedish',
+  nor: 'Norwegian',
+  dan: 'Danish',
+  fin: 'Finnish',
+  est: 'Estonian',
+  lit: 'Lithuanian',
+  lav: 'Latvian',
+  cat: 'Catalan',
+  eus: 'Basque',
+  glg: 'Galician',
+  cym: 'Welsh',
+  gle: 'Irish',
+  isl: 'Icelandic',
+  mlt: 'Maltese',
+};
+
+/**
+ * Per-turn language-hint detector. Runs franc-min on the user's
+ * most recent text. Returns a short system-message string only when
+ * detection is CONFIDENT and the language is NOT English. When
+ * detection is uncertain ('und'), we deliberately return null and
+ * let the model default to English — biasing toward English on
+ * uncertain short input avoids the failure mode where a 2-word
+ * Romanian message ("Te iubesc") is treated as a phrase to discuss
+ * in the conversation's current language instead of a language
+ * switch.
+ *
+ * Injected as a fresh system message right before the user's text
+ * in the answer-round prompt — the latest authoritative cue the
+ * model sees.
+ */
+export function detectLanguageHint(userText: string): string | null {
+  if (!userText) return null;
+  const trimmed = userText.trim();
+  if (trimmed.length < 3) return null;
+  let iso: string;
+  try {
+    iso = franc(trimmed, { minLength: 3 });
+  } catch {
+    return null;
+  }
+  if (iso === 'und' || iso === 'eng') return null;
+  const name = ISO_639_3_TO_LANGUAGE_NAME[iso];
+  if (!name) return null;
+  return `LANGUAGE NOTE FOR THIS TURN: The user's most recent message is in ${name}. Your ENTIRE reply (every sentence, every aside) must be in ${name}. This binding overrides any pull toward the conversation's prior language.`;
+}
 
 export interface HistoryTurn {
   role: 'user' | 'assistant';
@@ -177,6 +252,10 @@ const CONSENSUS_RULE = [
   '- A claim supported by ONLY one source while contradicted by several others is unreliable. Do not build confident statements on an outlier. Say what most sources agree on, or surface the disagreement honestly ("most reporting says X, though one source claims Y").',
   '- Pay attention to what most sources DO NOT say. If you are about to claim a dramatic event (a fight result, a death, a specific date, a quoted statement) and only one out of many sources mentions it, treat that as a red flag — content-farm or fabricated articles can produce such matches.',
   '- Never invent details (named bodyguards, crowd size, specific punches, exact times, quoted reactions) that no source explicitly states, even if it would make the answer more vivid. Vividness is not worth fabrication.',
+  '',
+  'EXISTENCE BEFORE DETAILS — the absent-entity rule:',
+  '- Before describing or attributing anything about a person, place, work, event, organisation, or any other named entity the user has asked about, first check: does any source in the <search_results> block actually mention that entity by name? If NO source mentions it, the entity may not exist, may be fictional, or may be misspelled. In that case your answer MUST lead with that: "I cannot find any source that mentions <entity>. It may be fictional, misnamed, or simply not covered by these results." Do NOT invent an attribution, a fictional-universe origin, a creator, or any other plausible-sounding contextualisation. Plausible is not the same as supported.',
+  '- This applies even when the named entity has the shape of a real thing (a city-sounding name, a person-sounding name, a book-sounding title). Shape is not evidence; sources are.',
 ].join('\n');
 
 /**
@@ -399,6 +478,18 @@ export function buildAnswerPrompt(args: {
       role: 'system',
       content: `Information gathered for this turn:\n${args.fulfilledContext}`,
     });
+  }
+
+  // Per-turn language hint: detect the user's language server-side and
+  // inject a binding system message just before the user turn. This
+  // is the LAST system instruction the model reads before the user
+  // text, which gives it the strongest weight against the
+  // "treat short foreign-language messages as quotes in the current
+  // language" failure mode. detectLanguageHint returns null on
+  // uncertain input (biases to English by default).
+  const languageHint = detectLanguageHint(args.userText);
+  if (languageHint) {
+    mandatorySystemMessages.push({ role: 'system', content: languageHint });
   }
 
   const currentUserMessage: LlmMessage = {
