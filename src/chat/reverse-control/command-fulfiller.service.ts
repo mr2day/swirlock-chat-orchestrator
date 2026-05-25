@@ -29,6 +29,57 @@ export interface FulfillmentResult {
 }
 
 /**
+ * One leg of the SEARCH fan-out's result. Beyond evidence, carries the
+ * RAG diagnostics blob (which includes any upstream provider error like
+ * Exa's "credits exhausted" message) plus a transport-level error
+ * captured when the RAG call itself failed (network, timeout). Either
+ * of those is bubbled into the SEARCH result string when every leg
+ * comes back empty, so the model can tell the user what actually
+ * happened instead of silently confabulating an ungrounded answer.
+ */
+interface FanoutLegResult {
+  query: string;
+  evidence: RagEvidence[];
+  diagnostics?: Record<string, unknown>;
+  transportError?: string;
+}
+
+/**
+ * Returns the first non-empty upstream search-provider failure
+ * message across the fan-out legs, or null when every leg either
+ * returned successfully (with zero matches) or carried no diagnostic
+ * indication of failure.
+ *
+ * RAG engine reports the upstream Exa error as
+ * `diagnostics.liveSearchError` (string). A failure on the orchestrator
+ * ↔ RAG transport itself surfaces as the leg's `transportError`.
+ */
+function extractProviderFailureMessage(
+  fanout: FanoutLegResult[],
+): string | null {
+  for (const leg of fanout) {
+    if (typeof leg.transportError === 'string' && leg.transportError.trim()) {
+      return leg.transportError.trim();
+    }
+    const diag = leg.diagnostics as
+      | { liveSearchError?: unknown; warnings?: unknown }
+      | undefined;
+    const liveErr = diag?.liveSearchError;
+    if (typeof liveErr === 'string' && liveErr.trim()) {
+      return liveErr.trim();
+    }
+    if (Array.isArray(diag?.warnings)) {
+      for (const w of diag.warnings) {
+        if (typeof w === 'string' && w.trim()) {
+          return w.trim();
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Dispatches each parsed command to its handler.
  *
  * In the new pre-inject regime, the user's location and dateTime are
@@ -121,7 +172,7 @@ export class CommandFulfillerService {
       // by correlationId, so reusing the turn id across legs would
       // overwrite each leg's resolver and only the last one would ever
       // settle, hanging Promise.all forever. We merge by URL afterwards.
-      const fanout = await Promise.all(
+      const fanout: FanoutLegResult[] = await Promise.all(
         queries.map((q, idx) =>
           this.rag
             .retrieve({
@@ -136,12 +187,18 @@ export class CommandFulfillerService {
               onStreamEvent: ctx.onRetrievalStreamEvent,
               abortSignal: ctx.abortSignal,
             })
-            .then((res) => ({ query: q, evidence: res.evidence }))
-            .catch((err: Error) => {
+            .then(
+              (res): FanoutLegResult => ({
+                query: q,
+                evidence: res.evidence,
+                diagnostics: res.diagnostics,
+              }),
+            )
+            .catch((err: Error): FanoutLegResult => {
               this.log.warn(
                 `${label} fan-out leg "${q}" failed: ${err.message}`,
               );
-              return { query: q, evidence: [] };
+              return { query: q, evidence: [], transportError: err.message };
             }),
         ),
       );
@@ -149,9 +206,20 @@ export class CommandFulfillerService {
       const merged = this.dedupeAcrossFanout(fanout);
 
       if (merged.length === 0) {
+        // No evidence came back. Distinguish "search ran cleanly and
+        // found nothing" from "search provider failed" — the model
+        // shouldn't silently make up an answer when the upstream
+        // search has actually broken. The former passes through as
+        // "Search returned no results." (pre-existing behaviour);
+        // the latter surfaces the upstream error so the model can
+        // tell the user what's wrong instead of confabulating.
+        const providerError = extractProviderFailureMessage(fanout);
         return {
           command: label,
-          value: 'Search returned no results.',
+          value:
+            providerError !== null
+              ? `Web search failed: ${providerError}. Tell the user the web search isn't working right now (and quote the specific cause when it points at a billing / credits / quota issue). Do not invent facts that would have come from a real search.`
+              : 'Search returned no results.',
           evidence: [],
         };
       }
