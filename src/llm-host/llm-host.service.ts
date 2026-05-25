@@ -11,6 +11,8 @@ import { SERVICE_CONFIG } from '../config/config';
 import type { ServiceConfig } from '../config/config';
 import { PersistentModelHostSocket } from './persistent-model-host-socket';
 import type {
+  LlmBackendInfo,
+  LlmBackendsList,
   LlmContextWindow,
   LlmInferOptions,
   LlmInputPart,
@@ -22,6 +24,8 @@ import type {
 } from './llm-stream-types';
 
 export type {
+  LlmBackendInfo,
+  LlmBackendsList,
   LlmContextWindow,
   LlmInferOptions,
   LlmInputPart,
@@ -31,6 +35,8 @@ export type {
   LlmStreamResult,
   QueueWaitInfo,
 };
+
+export type LlmBackendName = 'ollama' | 'anthropic';
 
 function rawToString(raw: WebSocket.RawData): string {
   if (typeof raw === 'string') return raw;
@@ -87,8 +93,8 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  async getModelId(): Promise<string> {
-    return (await this.getModelInfo()).modelId;
+  async getModelId(backend?: LlmBackendName): Promise<string> {
+    return (await this.getModelInfo(backend)).modelId;
   }
 
   /**
@@ -99,8 +105,12 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
    * checkbox when the configured model does not support thinking).
    * Always proxies live to the LLM Host so model swaps there are
    * visible without an orchestrator restart.
+   *
+   * Optionally targets a specific backend on the LLM Host (e.g.
+   * 'anthropic'). When omitted, the LLM Host returns the status of
+   * its configured default backend.
    */
-  async getModelInfo(): Promise<LlmModelInfo> {
+  async getModelInfo(backend?: LlmBackendName): Promise<LlmModelInfo> {
     const baseUrl = this.cfg.llmHost.baseUrl.replace(/\/$/, '');
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/v5/model';
     const correlationId = randomUUID();
@@ -115,7 +125,14 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
         reject(new Error('model.status timeout'));
       }, this.cfg.llmHost.timeoutMs);
       ws.on('open', () => {
-        ws.send(JSON.stringify({ type: 'model.status', correlationId }));
+        const payload = backend ? { backend } : undefined;
+        ws.send(
+          JSON.stringify({
+            type: 'model.status',
+            correlationId,
+            ...(payload ? { payload } : {}),
+          }),
+        );
       });
       ws.on('message', (raw) => {
         try {
@@ -191,6 +208,115 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
     return info;
   }
 
+  /**
+   * Returns the list of backends the LLM Host is currently configured
+   * to serve. Used by the UI's model picker to render its dropdown.
+   * Always queries live (no caching) so model picker reflects the
+   * current host state.
+   */
+  async listBackends(): Promise<LlmBackendsList> {
+    const baseUrl = this.cfg.llmHost.baseUrl.replace(/\/$/, '');
+    const wsUrl = baseUrl.replace(/^http/, 'ws') + '/v5/model';
+    const correlationId = randomUUID();
+    return new Promise<LlmBackendsList>((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      const timer = setTimeout(() => {
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+        reject(new Error('backends.list timeout'));
+      }, this.cfg.llmHost.timeoutMs);
+      ws.on('open', () => {
+        ws.send(JSON.stringify({ type: 'backends.list', correlationId }));
+      });
+      ws.on('message', (raw) => {
+        try {
+          const env = JSON.parse(rawToString(raw)) as RawLlmEnvelope;
+          if (env.correlationId !== correlationId) return;
+          clearTimeout(timer);
+          try {
+            ws.close();
+          } catch {
+            /* ignore */
+          }
+          if (env.type === 'error') {
+            // Hosts on older builds (pre-multi-backend) don't know
+            // this message type and reply with `validation_failed`.
+            // In that case we synthesize a single-backend list from
+            // the legacy model.status so the UI still renders.
+            this.legacyListBackendsFallback().then(resolve, reject);
+            return;
+          }
+          if (!isRecord(env.payload)) {
+            reject(new Error('backends.list returned no payload'));
+            return;
+          }
+          const defaultBackend = env.payload.defaultBackend;
+          const backendsRaw = env.payload.backends;
+          if (
+            (defaultBackend !== 'ollama' && defaultBackend !== 'anthropic') ||
+            !Array.isArray(backendsRaw)
+          ) {
+            reject(new Error('backends.list returned malformed payload'));
+            return;
+          }
+          const backends: LlmBackendInfo[] = [];
+          for (const item of backendsRaw) {
+            if (!isRecord(item)) continue;
+            if (item.name !== 'ollama' && item.name !== 'anthropic') continue;
+            if (
+              typeof item.displayName !== 'string' ||
+              typeof item.modelId !== 'string'
+            ) {
+              continue;
+            }
+            const location =
+              item.location === 'cloud' ? 'cloud' : 'local';
+            backends.push({
+              name: item.name as LlmBackendName,
+              displayName: item.displayName,
+              modelId: item.modelId,
+              location,
+            });
+          }
+          resolve({
+            defaultBackend: defaultBackend as LlmBackendName,
+            backends,
+          });
+        } catch (err) {
+          clearTimeout(timer);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
+      ws.on('error', (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
+  private async legacyListBackendsFallback(): Promise<LlmBackendsList> {
+    // Pre-multi-backend hosts don't speak `backends.list`. Build a
+    // single-entry list from their model.status. We don't know which
+    // backend the host actually runs (the host doesn't expose that
+    // field on older builds), so we report it as 'ollama' (the only
+    // backend that existed before this version).
+    const info = await this.getModelInfo();
+    return {
+      defaultBackend: 'ollama',
+      backends: [
+        {
+          name: 'ollama',
+          displayName: `Ollama — ${info.modelId} (local)`,
+          modelId: info.modelId,
+          location: 'local',
+        },
+      ],
+    };
+  }
+
   onModuleDestroy(): void {
     this.client?.close();
     this.client = undefined;
@@ -210,9 +336,16 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
     options?: LlmInferOptions;
     onEvent?: (event: LlmStreamEvent) => void;
     abortSignal?: AbortSignal;
+    /**
+     * Optional per-request backend selector. When omitted, the LLM
+     * Host routes to its configured default backend (preserving
+     * pre-multi-backend behaviour).
+     */
+    backend?: LlmBackendName;
   }): Promise<LlmStreamResult> {
     console.log('===== LLM PROMPT =====');
     console.log('correlationId:', args.correlationId);
+    console.log('backend:', args.backend ?? '(default)');
     console.log('options:', JSON.stringify(args.options ?? {}));
     if (args.messages) {
       for (const m of args.messages) {
@@ -244,6 +377,7 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
     parts?: LlmInputPart[];
     messages?: LlmMessage[];
     options?: LlmInferOptions;
+    backend?: LlmBackendName;
   }) {
     return {
       requestContext: {
@@ -255,6 +389,7 @@ export class LlmHostService implements OnModuleInit, OnModuleDestroy {
         ...(args.parts ? { parts: args.parts } : {}),
       },
       ...(args.options ? { options: args.options } : {}),
+      ...(args.backend ? { backend: args.backend } : {}),
     };
   }
 

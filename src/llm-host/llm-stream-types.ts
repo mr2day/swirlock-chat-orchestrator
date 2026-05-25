@@ -65,3 +65,22 @@ export interface LlmModelInfo {
   thinkingSupported: boolean;
   contextWindow?: LlmContextWindow;
 }
+
+/**
+ * One LLM-host-configured backend, as returned by `backends.list`.
+ * The display name is what the UI's model dropdown renders.
+ */
+export interface LlmBackendInfo {
+  name: 'ollama' | 'anthropic';
+  displayName: string;
+  modelId: string;
+  location: 'local' | 'cloud';
+}
+
+/**
+ * Response payload for the `backends.list` round-trip.
+ */
+export interface LlmBackendsList {
+  defaultBackend: 'ollama' | 'anthropic';
+  backends: LlmBackendInfo[];
+}

@@ -208,6 +208,7 @@ export class ReverseControlFlowService {
         correlationId: ctx.correlationId,
         messages: assessmentMessages,
         options: { responseFormat: 'text', thinking: false, ollama },
+        ...(input.dto.backend ? { backend: input.dto.backend } : {}),
         abortSignal: input.abortSignal,
         onEvent: (evt) => {
           if (evt.type === 'chunk' && evt.payload.text) {
@@ -346,6 +347,7 @@ export class ReverseControlFlowService {
           thinking: thinkingForAnswer,
           ...(Object.keys(finalOllama).length > 0 ? { ollama: finalOllama } : {}),
         },
+        ...(input.dto.backend ? { backend: input.dto.backend } : {}),
         abortSignal: input.abortSignal,
         onEvent: (evt) => {
           if (evt.type === 'chunk') {

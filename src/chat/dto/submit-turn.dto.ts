@@ -129,4 +129,16 @@ export class SubmitTurnDto {
   @ValidateNested()
   @Type(() => OptionsDto)
   options?: OptionsDto;
+
+  /**
+   * Optional per-turn LLM backend selector. The orchestrator forwards
+   * this through to the LLM Host's `infer` call so a single host
+   * instance with multiple backends configured (e.g. Ollama + Anthropic)
+   * routes this turn to the chosen one. When omitted, the LLM Host
+   * falls back to its env-configured default. The UI's model picker
+   * sets this per session in localStorage.
+   */
+  @IsOptional()
+  @IsIn(['ollama', 'anthropic'])
+  backend?: 'ollama' | 'anthropic';
 }

@@ -60,6 +60,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Extracts an optional `backend` selector from an envelope payload.
+ * The UI sends `backends.list` and `model.status` with an optional
+ * `payload.backend` to query a non-default backend's info on the
+ * LLM Host.
+ */
+function optionalBackendName(
+  payload: unknown,
+): 'ollama' | 'anthropic' | undefined {
+  if (!isRecord(payload)) return undefined;
+  const value = payload.backend;
+  if (value === 'ollama' || value === 'anthropic') return value;
+  return undefined;
+}
+
+/**
  * WebSocket endpoint handler for `/v5/chat`.
  *
  * Owns:
@@ -203,7 +218,8 @@ export class ChatStreamHandler {
 
     if (envelope.type === 'model.status') {
       try {
-        const info = await this.llm.getModelInfo();
+        const backend = optionalBackendName(envelope.payload);
+        const info = await this.llm.getModelInfo(backend);
         this.send(ws, {
           type: 'model.status',
           correlationId: envelope.correlationId,
@@ -215,6 +231,25 @@ export class ChatStreamHandler {
           envelope.correlationId,
           503,
           err instanceof Error ? err.message : 'model.status failed',
+        );
+      }
+      return;
+    }
+
+    if (envelope.type === 'backends.list') {
+      try {
+        const backends = await this.llm.listBackends();
+        this.send(ws, {
+          type: 'backends.list',
+          correlationId: envelope.correlationId,
+          payload: backends,
+        });
+      } catch (err) {
+        this.sendError(
+          ws,
+          envelope.correlationId,
+          503,
+          err instanceof Error ? err.message : 'backends.list failed',
         );
       }
       return;
